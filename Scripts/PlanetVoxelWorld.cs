@@ -98,20 +98,27 @@ public partial class PlanetVoxelWorld : Node3D
         private float blockSize = 0.6f;
         private bool generateOnAwake = true;
         private Material? overrideMaterial;
+        private Texture2D? grassTexture;
+        private Texture2D? dirtTexture;
+        private Texture2D? stoneTexture;
         private bool useDebugColors = true;
         private bool cullFacesAgainstNeighborBlocks = true;
         private int chunkSizeInCells = 12;
+        private int atlasPaddingPixels = 2;
+        private int fallbackTextureSize = 16;
 
         private readonly Dictionary<PlanetCellId, VoxelBlockType> blocks = new();
         private readonly HashSet<PlanetCellId> removedTerrainCells = new();
         private readonly Dictionary<ChunkId, ChunkSection> chunks = new();
         private readonly Dictionary<ChunkId, HashSet<PlanetCellId>> cellsByChunk = new();
         private readonly Dictionary<CollisionObject3D, ChunkRenderSection> renderSectionByCollider = new();
-        private readonly Dictionary<VoxelBlockType, Material> materials = new();
+        private readonly Dictionary<VoxelBlockType, AtlasRegion> atlasRegions = new();
         private readonly Color[] faceDebugColors = new Color[CubeFaces.Length];
         private bool generated;
         private Basis distortionOptimizedRotation = Basis.Identity;
         private Basis inverseDistortionOptimizedRotation = Basis.Identity;
+        private Material? atlasMaterial;
+        private Texture2D? atlasTexture;
 
         [ExportGroup("Planet Shape")]
         [Export(PropertyHint.Range, "6,512,1")]
@@ -169,14 +176,78 @@ public partial class PlanetVoxelWorld : Node3D
         public Material? OverrideMaterial
         {
             get => overrideMaterial;
-            set => overrideMaterial = value;
+            set
+            {
+                overrideMaterial = value;
+                InvalidateAtlasResources();
+            }
+        }
+
+        [ExportGroup("Textures")]
+        [Export]
+        public Texture2D? GrassTexture
+        {
+            get => grassTexture;
+            set
+            {
+                grassTexture = value;
+                InvalidateAtlasResources();
+            }
+        }
+
+        [Export]
+        public Texture2D? DirtTexture
+        {
+            get => dirtTexture;
+            set
+            {
+                dirtTexture = value;
+                InvalidateAtlasResources();
+            }
+        }
+
+        [Export]
+        public Texture2D? StoneTexture
+        {
+            get => stoneTexture;
+            set
+            {
+                stoneTexture = value;
+                InvalidateAtlasResources();
+            }
+        }
+
+        [Export(PropertyHint.Range, "0,8,1")]
+        public int AtlasPaddingPixels
+        {
+            get => atlasPaddingPixels;
+            set
+            {
+                atlasPaddingPixels = Math.Max(0, value);
+                InvalidateAtlasResources();
+            }
+        }
+
+        [Export(PropertyHint.Range, "1,256,1")]
+        public int FallbackTextureSize
+        {
+            get => fallbackTextureSize;
+            set
+            {
+                fallbackTextureSize = Math.Max(1, value);
+                InvalidateAtlasResources();
+            }
         }
 
         [Export]
         public bool UseDebugColors
         {
             get => useDebugColors;
-            set => useDebugColors = value;
+            set
+            {
+                useDebugColors = value;
+                InvalidateAtlasResources();
+            }
         }
 
         [Export]
@@ -211,6 +282,7 @@ public partial class PlanetVoxelWorld : Node3D
         public void GeneratePlanet()
         {
             RefreshCachedData();
+            InvalidateAtlasResources();
             blocks.Clear();
             removedTerrainCells.Clear();
             ClearChunks();
@@ -338,6 +410,7 @@ public partial class PlanetVoxelWorld : Node3D
             chunkSizeInCells = data.ChunkSizeInCells;
 
             RefreshCachedData();
+            InvalidateAtlasResources();
             blocks.Clear();
             removedTerrainCells.Clear();
             ClearChunks();
@@ -424,16 +497,11 @@ public partial class PlanetVoxelWorld : Node3D
             return true;
         }
 
-        private Material GetOrCreateMaterial(VoxelBlockType blockType)
+        private void InvalidateAtlasResources()
         {
-            if (materials.TryGetValue(blockType, out Material? material))
-            {
-                return material;
-            }
-
-            material = CreateMaterial(blockType, GetBlockColor(blockType));
-            materials[blockType] = material;
-            return material;
+            atlasMaterial = null;
+            atlasTexture = null;
+            atlasRegions.Clear();
         }
 
         private static Color GetBlockColor(VoxelBlockType blockType)
@@ -447,40 +515,220 @@ public partial class PlanetVoxelWorld : Node3D
             };
         }
 
-        private Material CreateMaterial(VoxelBlockType blockType, Color color)
+        private Material GetOrCreateAtlasMaterial()
         {
-            if (overrideMaterial is not null)
+            EnsureAtlasResources();
+            return atlasMaterial!;
+        }
+
+        private void EnsureAtlasResources()
+        {
+            if (atlasMaterial is not null &&
+                atlasTexture is not null &&
+                atlasRegions.Count == RenderBlockTypes.Length)
             {
-                Material clone = (Material)overrideMaterial.Duplicate();
-                clone.ResourceName = blockType + " Material";
-                if (clone is BaseMaterial3D baseClone)
+                return;
+            }
+
+            AtlasBuildResult atlas = BuildTextureAtlas();
+            atlasTexture = atlas.Texture;
+            atlasMaterial = CreateAtlasMaterial(atlas.Texture);
+            atlasRegions.Clear();
+
+            foreach (KeyValuePair<VoxelBlockType, AtlasRegion> region in atlas.Regions)
+            {
+                atlasRegions[region.Key] = region.Value;
+            }
+        }
+
+        private AtlasBuildResult BuildTextureAtlas()
+        {
+            int padding = Math.Max(0, atlasPaddingPixels);
+            List<AtlasSource> sources = new(RenderBlockTypes.Length);
+            int totalArea = 0;
+            int maxWidth = 1;
+
+            foreach (VoxelBlockType blockType in RenderBlockTypes)
+            {
+                Image image = GetAtlasSourceImage(blockType);
+                sources.Add(new AtlasSource(blockType, image));
+                totalArea += (image.GetWidth() + padding * 2) * (image.GetHeight() + padding * 2);
+                maxWidth = Math.Max(maxWidth, image.GetWidth() + padding * 2);
+            }
+
+            sources.Sort(static (left, right) =>
+            {
+                int heightComparison = right.Image.GetHeight().CompareTo(left.Image.GetHeight());
+                return heightComparison != 0 ? heightComparison : right.Image.GetWidth().CompareTo(left.Image.GetWidth());
+            });
+
+            int atlasWidth = NextPowerOfTwo(Math.Max(maxWidth, Mathf.CeilToInt(Mathf.Sqrt(totalArea))));
+            Dictionary<VoxelBlockType, Rect2I> placements;
+            int usedHeight;
+
+            while (true)
+            {
+                (bool success, Dictionary<VoxelBlockType, Rect2I> packedPlacements, int packedHeight) =
+                    TryPackAtlas(sources, atlasWidth, padding);
+
+                if (success)
                 {
-                    baseClone.AlbedoColor = color;
+                    placements = packedPlacements;
+                    usedHeight = packedHeight;
+                    break;
                 }
 
-                if (useDebugColors)
+                atlasWidth *= 2;
+            }
+
+            int atlasHeight = NextPowerOfTwo(Math.Max(1, usedHeight));
+            Image atlasImage = Image.CreateEmpty(atlasWidth, atlasHeight, false, Image.Format.Rgba8);
+            atlasImage.Fill(Colors.Transparent);
+            Dictionary<VoxelBlockType, AtlasRegion> regions = new(RenderBlockTypes.Length);
+
+            foreach (AtlasSource source in sources)
+            {
+                Rect2I placement = placements[source.BlockType];
+                atlasImage.BlitRect(
+                    source.Image,
+                    new Rect2I(Vector2I.Zero, new Vector2I(source.Image.GetWidth(), source.Image.GetHeight())),
+                    placement.Position);
+
+                regions[source.BlockType] = CreateAtlasRegion(placement, atlasWidth, atlasHeight);
+            }
+
+            return new AtlasBuildResult(ImageTexture.CreateFromImage(atlasImage), regions);
+        }
+
+        private Image GetAtlasSourceImage(VoxelBlockType blockType)
+        {
+            Texture2D? sourceTexture = GetTextureForBlock(blockType);
+            Image? sourceImage = sourceTexture?.GetImage();
+
+            if (sourceImage is null || sourceImage.GetWidth() <= 0 || sourceImage.GetHeight() <= 0)
+            {
+                return CreateFallbackBlockImage(GetBlockColor(blockType));
+            }
+
+            return sourceImage;
+        }
+
+        private Texture2D? GetTextureForBlock(VoxelBlockType blockType)
+        {
+            return blockType switch
+            {
+                VoxelBlockType.Grass => grassTexture,
+                VoxelBlockType.Dirt => dirtTexture,
+                VoxelBlockType.Stone => stoneTexture,
+                _ => null
+            };
+        }
+
+        private Image CreateFallbackBlockImage(Color color)
+        {
+            int size = Math.Max(1, fallbackTextureSize);
+            Image image = Image.CreateEmpty(size, size, false, Image.Format.Rgba8);
+            image.Fill(color);
+            return image;
+        }
+
+        private static (bool Success, Dictionary<VoxelBlockType, Rect2I> Placements, int UsedHeight) TryPackAtlas(
+            List<AtlasSource> sources,
+            int atlasWidth,
+            int padding)
+        {
+            Dictionary<VoxelBlockType, Rect2I> placements = new(sources.Count);
+            int x = padding;
+            int y = padding;
+            int shelfHeight = 0;
+
+            foreach (AtlasSource source in sources)
+            {
+                int sourceWidth = source.Image.GetWidth();
+                int sourceHeight = source.Image.GetHeight();
+
+                if (x + sourceWidth + padding > atlasWidth)
                 {
-                    EnableVertexColors(clone);
+                    x = padding;
+                    y += shelfHeight;
+                    shelfHeight = 0;
+                }
+
+                if (sourceWidth + padding * 2 > atlasWidth)
+                {
+                    return (false, placements, 0);
+                }
+
+                placements[source.BlockType] = new Rect2I(x, y, sourceWidth, sourceHeight);
+                x += sourceWidth + padding * 2;
+                shelfHeight = Math.Max(shelfHeight, sourceHeight + padding * 2);
+            }
+
+            return (true, placements, y + shelfHeight);
+        }
+
+        private static AtlasRegion CreateAtlasRegion(Rect2I placement, int atlasWidth, int atlasHeight)
+        {
+            float halfPixelX = 0.5f / atlasWidth;
+            float halfPixelY = 0.5f / atlasHeight;
+            Vector2 min = new(
+                placement.Position.X / (float)atlasWidth + halfPixelX,
+                placement.Position.Y / (float)atlasHeight + halfPixelY);
+            Vector2 max = new(
+                (placement.Position.X + placement.Size.X) / (float)atlasWidth - halfPixelX,
+                (placement.Position.Y + placement.Size.Y) / (float)atlasHeight - halfPixelY);
+            return new AtlasRegion(min, max);
+        }
+
+        private Material CreateAtlasMaterial(Texture2D texture)
+        {
+            if (overrideMaterial is BaseMaterial3D)
+            {
+                Material clone = (Material)overrideMaterial.Duplicate();
+                clone.ResourceName = "Voxel Atlas Material";
+                if (clone is BaseMaterial3D baseClone)
+                {
+                    ConfigureAtlasMaterial(baseClone, texture);
                 }
 
                 return clone;
             }
 
+            if (overrideMaterial is not null)
+            {
+                GD.PushWarning("OverrideMaterial must inherit BaseMaterial3D to receive the runtime texture atlas. Falling back to a StandardMaterial3D.");
+            }
+
             StandardMaterial3D material = new()
             {
-                ResourceName = blockType + " Material",
-                AlbedoColor = color,
+                ResourceName = "Voxel Atlas Material",
                 Roughness = 0.92f,
                 Metallic = 0f,
                 CullMode = BaseMaterial3D.CullModeEnum.Back
             };
 
-            if (useDebugColors)
+            ConfigureAtlasMaterial(material, texture);
+            return material;
+        }
+
+        private void ConfigureAtlasMaterial(BaseMaterial3D material, Texture2D texture)
+        {
+            material.AlbedoColor = Colors.White;
+            material.AlbedoTexture = texture;
+            material.TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest;
+            material.TextureRepeat = false;
+            material.VertexColorUseAsAlbedo = useDebugColors;
+        }
+
+        private static int NextPowerOfTwo(int value)
+        {
+            int result = 1;
+            while (result < value)
             {
-                EnableVertexColors(material);
+                result <<= 1;
             }
 
-            return material;
+            return result;
         }
 
         private void ClearChunks()
@@ -497,13 +745,10 @@ public partial class PlanetVoxelWorld : Node3D
 
         private void DestroyChunkRuntime(ChunkSection chunk)
         {
-            foreach (ChunkRenderSection renderSection in chunk.RenderSections.Values)
-            {
-                renderSectionByCollider.Remove(renderSection.Body);
-                renderSection.MeshInstance.Mesh = null;
-                renderSection.CollisionShape.Shape = null;
-                renderSection.RuntimeMesh = null;
-            }
+            renderSectionByCollider.Remove(chunk.RenderSection.Body);
+            chunk.RenderSection.MeshInstance.Mesh = null;
+            chunk.RenderSection.CollisionShape.Shape = null;
+            chunk.RenderSection.RuntimeMesh = null;
 
             if (IsInstanceValid(chunk.Root))
             {
@@ -629,40 +874,37 @@ public partial class PlanetVoxelWorld : Node3D
                 Root = chunkObject
             };
 
-            foreach (VoxelBlockType blockType in RenderBlockTypes)
+            Node3D sectionObject = new()
             {
-                Node3D sectionObject = new()
-                {
-                    Name = blockType + " Section"
-                };
-                chunkObject.AddChild(sectionObject);
+                Name = "Voxel Section"
+            };
+            chunkObject.AddChild(sectionObject);
 
-                MeshInstance3D meshInstance = new()
-                {
-                    MaterialOverride = GetOrCreateMaterial(blockType)
-                };
-                sectionObject.AddChild(meshInstance);
+            MeshInstance3D meshInstance = new()
+            {
+                MaterialOverride = GetOrCreateAtlasMaterial()
+            };
+            sectionObject.AddChild(meshInstance);
 
-                StaticBody3D body = new()
-                {
-                    CollisionLayer = 1,
-                    CollisionMask = 0
-                };
-                sectionObject.AddChild(body);
+            StaticBody3D body = new()
+            {
+                CollisionLayer = 1,
+                CollisionMask = 0
+            };
+            sectionObject.AddChild(body);
 
-                CollisionShape3D collisionShape = new();
-                body.AddChild(collisionShape);
+            CollisionShape3D collisionShape = new();
+            body.AddChild(collisionShape);
 
-                ChunkRenderSection renderSection = new ChunkRenderSection
-                {
-                    MeshInstance = meshInstance,
-                    Body = body,
-                    CollisionShape = collisionShape
-                };
+            ChunkRenderSection renderSection = new ChunkRenderSection
+            {
+                MeshInstance = meshInstance,
+                Body = body,
+                CollisionShape = collisionShape
+            };
 
-                chunk.RenderSections[blockType] = renderSection;
-                renderSectionByCollider[body] = renderSection;
-            }
+            chunk.RenderSection = renderSection;
+            renderSectionByCollider[body] = renderSection;
 
             chunks[chunkId] = chunk;
             return chunk;
@@ -685,11 +927,7 @@ public partial class PlanetVoxelWorld : Node3D
             }
 
             ChunkSection chunk = EnsureChunk(chunkId);
-
-            foreach (VoxelBlockType blockType in RenderBlockTypes)
-            {
-                BuildMeshForChunkType(blockType, chunk.RenderSections[blockType], chunkCells!);
-            }
+            BuildChunkMesh(chunk.RenderSection, chunkCells!);
         }
 
         private bool TryGetNaturalTerrainBlock(PlanetCellId cell, out VoxelBlockType blockType)
@@ -769,11 +1007,9 @@ public partial class PlanetVoxelWorld : Node3D
             return VoxelBlockType.Stone;
         }
 
-        private void BuildMeshForChunkType(
-            VoxelBlockType blockType,
-            ChunkRenderSection section,
-            HashSet<PlanetCellId> chunkCells)
+        private void BuildChunkMesh(ChunkRenderSection section, HashSet<PlanetCellId> chunkCells)
         {
+            EnsureAtlasResources();
             List<Vector3> vertices = new();
             List<Vector3> normals = new();
             List<Color> colors = new();
@@ -784,12 +1020,12 @@ public partial class PlanetVoxelWorld : Node3D
 
             foreach (PlanetCellId cell in chunkCells)
             {
-                if (!blocks.TryGetValue(cell, out VoxelBlockType cellBlockType) || cellBlockType != blockType)
+                if (!blocks.TryGetValue(cell, out VoxelBlockType blockType))
                 {
                     continue;
                 }
 
-                AddBlockFaces(cell, vertices, normals, colors, uvs, triangles, triangleHits, collisionFaces);
+                AddBlockFaces(blockType, cell, vertices, normals, colors, uvs, triangles, triangleHits, collisionFaces);
             }
 
             ArrayMesh? mesh = section.RuntimeMesh;
@@ -798,14 +1034,14 @@ public partial class PlanetVoxelWorld : Node3D
             {
                 mesh = new ArrayMesh
                 {
-                    ResourceName = blockType + " Mesh"
+                    ResourceName = "Chunk Mesh"
                 };
                 section.RuntimeMesh = mesh;
             }
             else
             {
                 mesh.ClearSurfaces();
-                mesh.ResourceName = blockType + " Mesh";
+                mesh.ResourceName = "Chunk Mesh";
             }
 
             if (vertices.Count == 0)
@@ -836,6 +1072,7 @@ public partial class PlanetVoxelWorld : Node3D
         }
 
         private void AddBlockFaces(
+            VoxelBlockType blockType,
             PlanetCellId cell,
             List<Vector3> vertices,
             List<Vector3> normals,
@@ -845,6 +1082,7 @@ public partial class PlanetVoxelWorld : Node3D
             List<TriangleHitData> triangleHits,
             List<Vector3> collisionFaces)
         {
+            AtlasRegion atlasRegion = atlasRegions[blockType];
             CubeFace cubeFace = CubeFaces[cell.Face];
             Vector3 cubeCenter = ToCubePoint(cell);
             bool shouldCullNeighborFaces = ShouldCullNeighborFaces();
@@ -874,7 +1112,7 @@ public partial class PlanetVoxelWorld : Node3D
                     renderedFaceVertices[i] = localProjected;
                     vertices.Add(localProjected);
                     colors.Add(GetDebugColor(cell, localProjected / blockSize));
-                    uvs.Add(FaceUvs[i]);
+                    uvs.Add(atlasRegion.Map(FaceUvs[i]));
                 }
 
                 Vector3 faceCenter =
@@ -1191,7 +1429,7 @@ public partial class PlanetVoxelWorld : Node3D
         private sealed class ChunkSection
         {
             public Node3D Root = null!;
-            public Dictionary<VoxelBlockType, ChunkRenderSection> RenderSections = new();
+            public ChunkRenderSection RenderSection = null!;
         }
 
         private sealed class ChunkRenderSection
@@ -1201,6 +1439,52 @@ public partial class PlanetVoxelWorld : Node3D
             public CollisionShape3D CollisionShape = null!;
             public ArrayMesh? RuntimeMesh;
             public List<TriangleHitData> TriangleHits = new();
+        }
+
+        private readonly struct AtlasSource
+        {
+            public AtlasSource(VoxelBlockType blockType, Image image)
+            {
+                BlockType = blockType;
+                Image = image;
+            }
+
+            public VoxelBlockType BlockType { get; }
+
+            public Image Image { get; }
+        }
+
+        private readonly struct AtlasRegion
+        {
+            public AtlasRegion(Vector2 min, Vector2 max)
+            {
+                Min = min;
+                Max = max;
+            }
+
+            public Vector2 Min { get; }
+
+            public Vector2 Max { get; }
+
+            public Vector2 Map(Vector2 uv)
+            {
+                return new Vector2(
+                    Mathf.Lerp(Min.X, Max.X, uv.X),
+                    Mathf.Lerp(Min.Y, Max.Y, uv.Y));
+            }
+        }
+
+        private readonly struct AtlasBuildResult
+        {
+            public AtlasBuildResult(Texture2D texture, Dictionary<VoxelBlockType, AtlasRegion> regions)
+            {
+                Texture = texture;
+                Regions = regions;
+            }
+
+            public Texture2D Texture { get; }
+
+            public Dictionary<VoxelBlockType, AtlasRegion> Regions { get; }
         }
 
         private static class UnityPerlinNoise

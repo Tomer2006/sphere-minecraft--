@@ -20,9 +20,6 @@ environment = SubResource("Environment_q2ekf")
 
 [node name="World" type="Node3D" parent="." unique_id=1281627882]
 script = ExtResource("1_a4wja")
-BaseRadiusInBlocks = 500
-HeightVariationInBlocks = 10.3
-WorldSeed = 10
 DistortionOptimizedRotationEuler = Vector3(0, 0, 0)
 BlockSize = 1.0
 UseDebugColors = false
