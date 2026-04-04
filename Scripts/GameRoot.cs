@@ -1,0 +1,232 @@
+using Godot;
+
+namespace SphereMinecraft;
+
+public partial class GameRoot : SceneLighting
+{
+    private const string MainMenuScenePath = "res://Scenes/main_menu.tscn";
+
+    [Export] public NodePath WorldPath { get; set; } = new("World");
+    [Export] public NodePath PlayerPath { get; set; } = new("Player");
+
+    private PlanetVoxelWorld? world;
+    private PlanetPlayer? player;
+    private CanvasLayer? pauseMenuLayer;
+    private PanelContainer? pauseMenuPanel;
+    private Label? saveStatusLabel;
+    private bool pauseMenuVisible;
+
+    public override void _Ready()
+    {
+        base._Ready();
+        ProcessMode = ProcessModeEnum.Always;
+        BuildPauseMenu();
+        CallDeferred(nameof(InitializeSession));
+    }
+
+    public override void _Input(InputEvent @event)
+    {
+        if (@event is not InputEventKey keyEvent || !keyEvent.Pressed || keyEvent.Echo)
+        {
+            return;
+        }
+
+        if (keyEvent.Keycode == Key.Escape)
+        {
+            TogglePauseMenu();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
+        if (keyEvent.Keycode == Key.F5)
+        {
+            SaveCurrentGame("Game saved.");
+            GetViewport().SetInputAsHandled();
+        }
+    }
+
+    public override void _Notification(int what)
+    {
+        if (what == NotificationWMCloseRequest)
+        {
+            SaveCurrentGame();
+        }
+    }
+
+    private void InitializeSession()
+    {
+        world = GetNodeOrNull<PlanetVoxelWorld>(WorldPath);
+        player = GetNodeOrNull<PlanetPlayer>(PlayerPath);
+
+        if (world is null || player is null)
+        {
+            GD.PushError("GameRoot could not find the world or player.");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(SaveGameManager.PendingLoadSlotId) &&
+            SaveGameManager.TryLoadGame(SaveGameManager.PendingLoadSlotId!, out SaveGameData? saveData) &&
+            saveData is not null)
+        {
+            SaveGameManager.CurrentSlotId = saveData.SlotId;
+            world.LoadFromSave(saveData.World);
+            player.ApplySaveData(saveData.Player);
+            UpdateSaveStatus("Loaded " + saveData.SaveName + ".");
+        }
+        else
+        {
+            UpdateSaveStatus("New game. Press F5 to create a save.");
+        }
+
+        SaveGameManager.PendingLoadSlotId = null;
+        SetPauseMenuVisible(false);
+    }
+
+    private void BuildPauseMenu()
+    {
+        pauseMenuLayer = new CanvasLayer
+        {
+            Name = "PauseMenu",
+            Visible = false,
+            ProcessMode = ProcessModeEnum.Always
+        };
+        AddChild(pauseMenuLayer);
+
+        ColorRect dim = new()
+        {
+            Name = "Dim",
+            Color = new Color(0.04f, 0.06f, 0.10f, 0.68f),
+            AnchorRight = 1f,
+            AnchorBottom = 1f,
+            MouseFilter = Control.MouseFilterEnum.Stop
+        };
+        pauseMenuLayer.AddChild(dim);
+
+        pauseMenuPanel = new PanelContainer
+        {
+            Name = "PausePanel",
+            CustomMinimumSize = new Vector2(360f, 0f),
+            AnchorLeft = 0.5f,
+            AnchorTop = 0.5f,
+            AnchorRight = 0.5f,
+            AnchorBottom = 0.5f,
+            OffsetLeft = -180f,
+            OffsetTop = -170f,
+            OffsetRight = 180f,
+            OffsetBottom = 170f,
+            MouseFilter = Control.MouseFilterEnum.Stop
+        };
+        pauseMenuLayer.AddChild(pauseMenuPanel);
+
+        MarginContainer margin = new()
+        {
+        };
+        margin.AddThemeConstantOverride("margin_left", 24);
+        margin.AddThemeConstantOverride("margin_top", 24);
+        margin.AddThemeConstantOverride("margin_right", 24);
+        margin.AddThemeConstantOverride("margin_bottom", 24);
+        pauseMenuPanel.AddChild(margin);
+
+        VBoxContainer layout = new()
+        {
+        };
+        layout.AddThemeConstantOverride("separation", 12);
+        margin.AddChild(layout);
+
+        Label title = new()
+        {
+            Text = "Voxel Planet",
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        layout.AddChild(title);
+
+        Button resumeButton = new() { Text = "Resume" };
+        resumeButton.Pressed += () => SetPauseMenuVisible(false);
+        layout.AddChild(resumeButton);
+
+        Button saveButton = new() { Text = "Save" };
+        saveButton.Pressed += () => SaveCurrentGame("Game saved.");
+        layout.AddChild(saveButton);
+
+        Button saveNewButton = new() { Text = "Save New Slot" };
+        saveNewButton.Pressed += () => SaveCurrentGame("Created new save.", true);
+        layout.AddChild(saveNewButton);
+
+        Button saveQuitButton = new() { Text = "Save And Quit To Menu" };
+        saveQuitButton.Pressed += SaveAndQuitToMenu;
+        layout.AddChild(saveQuitButton);
+
+        Button quitButton = new() { Text = "Quit Desktop" };
+        quitButton.Pressed += QuitDesktop;
+        layout.AddChild(quitButton);
+
+        saveStatusLabel = new Label
+        {
+            Text = "",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        layout.AddChild(saveStatusLabel);
+    }
+
+    private void TogglePauseMenu()
+    {
+        SetPauseMenuVisible(!pauseMenuVisible);
+    }
+
+    private void SetPauseMenuVisible(bool visible)
+    {
+        pauseMenuVisible = visible;
+
+        if (pauseMenuLayer != null)
+        {
+            pauseMenuLayer.Visible = visible;
+        }
+
+        GetTree().Paused = visible;
+        Input.MouseMode = visible ? Input.MouseModeEnum.Visible : Input.MouseModeEnum.Captured;
+    }
+
+    private bool SaveCurrentGame(string? statusMessage = null, bool forceNewSlot = false)
+    {
+        if (world is null || player is null)
+        {
+            return false;
+        }
+
+        bool saved = SaveGameManager.TrySaveGame(new SaveGameData
+        {
+            World = world.CreateSaveData(),
+            Player = player.CreateSaveData()
+        }, out string slotId, forceNewSlot);
+
+        UpdateSaveStatus(saved
+            ? (statusMessage ?? "Game saved.") + " [" + slotId + "]"
+            : "Save failed.");
+
+        return saved;
+    }
+
+    private void SaveAndQuitToMenu()
+    {
+        SaveCurrentGame("Game saved.");
+        SaveGameManager.PendingLoadSlotId = null;
+        GetTree().Paused = false;
+        GetTree().ChangeSceneToFile(MainMenuScenePath);
+    }
+
+    private void QuitDesktop()
+    {
+        SaveCurrentGame("Game saved.");
+        GetTree().Paused = false;
+        GetTree().Quit();
+    }
+
+    private void UpdateSaveStatus(string message)
+    {
+        if (saveStatusLabel != null)
+        {
+            saveStatusLabel.Text = message;
+        }
+    }
+}

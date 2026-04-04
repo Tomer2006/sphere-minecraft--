@@ -1,0 +1,60 @@
+[gd_scene format=3 uid="uid://c2dr2sralwx41"]
+
+[ext_resource type="Script" uid="uid://bsexnptopgna0" path="res://Scripts/PlanetVoxelWorld.cs" id="1_a4wja"]
+[ext_resource type="Script" uid="uid://bx1fnwyh6kw2d" path="res://Scripts/PlanetPlayer.cs" id="2_hpj0g"]
+[ext_resource type="Script" path="res://Scripts/GameRoot.cs" id="3_5q8sr"]
+
+[sub_resource type="Environment" id="Environment_q2ekf"]
+background_mode = 2
+ambient_light_source = 3
+ambient_light_color = Color(0.75, 0.82, 0.92, 1)
+ambient_light_energy = 0.6
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_8gbba"]
+
+[node name="Main" type="Node3D" unique_id=2033084935]
+script = ExtResource("3_5q8sr")
+SunRotationDegrees = Vector3(50, -30, 0)
+SunEnergy = 1.15
+SkyExposure = 1.0
+FogDensity = 0.0018
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1837184804]
+environment = SubResource("Environment_q2ekf")
+
+[node name="World" type="Node3D" parent="." unique_id=1281627882]
+script = ExtResource("1_a4wja")
+BaseRadiusInBlocks = 10
+HeightVariationInBlocks = 0.0
+NoiseScale = 0.1
+WorldSeed = 10
+DistortionOptimizedRotationEuler = Vector3(0, 0, 0)
+BlockSize = 1.0
+UseDebugColors = false
+CullFacesAgainstNeighborBlocks = true
+ChunkSizeInCells = 12
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=837703078]
+process_mode = 3
+transform = Transform3D(0.8660254, -0.38302222, -0.32139382, 0, 0.64278764, -0.76604444, 0.5, 0.66341394, 0.5566704, 0, 0, 0)
+light_energy = 1.15
+shadow_enabled = true
+shadow_bias = 0.05
+shadow_normal_bias = 1.0
+
+[node name="Player" type="CharacterBody3D" parent="." unique_id=2124311118]
+slide_on_ceiling = false
+script = ExtResource("2_hpj0g")
+SpawnHeightOffset = 3.0
+SkinWidth = 0.04
+MaxDepenetrationIterations = 2
+CollisionLayerBits = 2
+CollisionMaskBits = 1
+GroundedStickSpeed = 0.6
+GroundProbeDistance = 0.18
+GroundMinDot = 0.3
+UpSmoothingTime = 0.08
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=1353951316]
+shape = SubResource("CapsuleShape3D_8gbba")
+debug_fill = false
