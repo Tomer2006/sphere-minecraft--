@@ -69,13 +69,22 @@ public partial class GameRoot : SceneLighting
             saveData is not null)
         {
             SaveGameManager.CurrentSlotId = saveData.SlotId;
+            SaveGameManager.CurrentSaveName = saveData.SaveName;
             world.LoadFromSave(saveData.World);
             player.ApplySaveData(saveData.Player);
             UpdateSaveStatus("Loaded " + saveData.SaveName + ".");
         }
         else
         {
-            UpdateSaveStatus("New game. Press F5 to create a save.");
+            NewGameOptions options = SaveGameManager.ConsumePendingNewGame() ?? NewGameOptions.CreateDefault();
+            SaveGameManager.CurrentSaveName = string.IsNullOrWhiteSpace(options.SaveName) ? "New World" : options.SaveName;
+
+            world.BaseRadiusInBlocks = options.BaseRadiusInBlocks;
+            world.HeightVariationInBlocks = options.HeightVariationInBlocks;
+            world.WorldSeed = options.WorldSeed;
+            world.GeneratePlanet();
+
+            UpdateSaveStatus("Created " + SaveGameManager.CurrentSaveName + ". Press F5 to create a save.");
         }
 
         SaveGameManager.PendingLoadSlotId = null;
@@ -196,6 +205,7 @@ public partial class GameRoot : SceneLighting
 
         bool saved = SaveGameManager.TrySaveGame(new SaveGameData
         {
+            SaveName = SaveGameManager.CurrentSaveName ?? "",
             World = world.CreateSaveData(),
             Player = player.CreateSaveData()
         }, out string slotId, forceNewSlot);

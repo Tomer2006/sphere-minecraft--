@@ -17,6 +17,8 @@ public static class SaveGameManager
 
     public static string? PendingLoadSlotId { get; set; }
     public static string? CurrentSlotId { get; set; }
+    public static string? CurrentSaveName { get; set; }
+    public static NewGameOptions? PendingNewGameOptions { get; private set; }
 
     public static bool HasAnySave()
     {
@@ -118,7 +120,9 @@ public static class SaveGameManager
         saveData.SavedAtUtc = DateTime.UtcNow.ToString("O");
         if (string.IsNullOrWhiteSpace(saveData.SaveName))
         {
-            saveData.SaveName = "Save " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            saveData.SaveName = string.IsNullOrWhiteSpace(CurrentSaveName)
+                ? "Save " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+                : CurrentSaveName!;
         }
 
         using FileAccess? file = FileAccess.Open(GetSlotPath(slotId), FileAccess.ModeFlags.Write);
@@ -131,6 +135,7 @@ public static class SaveGameManager
         {
             file.StoreString(JsonSerializer.Serialize(saveData, JsonOptions));
             CurrentSlotId = slotId;
+            CurrentSaveName = saveData.SaveName;
             return true;
         }
         catch (Exception exception)
@@ -153,6 +158,7 @@ public static class SaveGameManager
         if (CurrentSlotId == slotId)
         {
             CurrentSlotId = null;
+            CurrentSaveName = null;
         }
 
         if (PendingLoadSlotId == slotId)
@@ -161,15 +167,26 @@ public static class SaveGameManager
         }
     }
 
-    public static void BeginNewGame()
+    public static void BeginNewGame(NewGameOptions? options = null)
     {
         PendingLoadSlotId = null;
         CurrentSlotId = null;
+        CurrentSaveName = options?.SaveName;
+        PendingNewGameOptions = options ?? NewGameOptions.CreateDefault();
     }
 
     public static void BeginLoadSlot(string slotId)
     {
         PendingLoadSlotId = slotId;
+        PendingNewGameOptions = null;
+        CurrentSaveName = null;
+    }
+
+    public static NewGameOptions? ConsumePendingNewGame()
+    {
+        NewGameOptions? options = PendingNewGameOptions;
+        PendingNewGameOptions = null;
+        return options;
     }
 
     private static void EnsureSaveDirectory()
@@ -214,6 +231,19 @@ public sealed class SaveGameData
     public string SavedAtUtc { get; set; } = "";
     public WorldSaveData World { get; set; } = new();
     public PlayerSaveData Player { get; set; } = new();
+}
+
+public sealed class NewGameOptions
+{
+    public string SaveName { get; set; } = "New World";
+    public int BaseRadiusInBlocks { get; set; } = 50;
+    public float HeightVariationInBlocks { get; set; } = 2.5f;
+    public int WorldSeed { get; set; } = 1337;
+
+    public static NewGameOptions CreateDefault()
+    {
+        return new NewGameOptions();
+    }
 }
 
 public sealed class WorldSaveData

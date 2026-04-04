@@ -7,14 +7,29 @@ public partial class MainMenu : Control
 {
     private const string GameScenePath = "res://Scenes/main.tscn";
 
+    private readonly RandomNumberGenerator random = new();
+
     private Button? continueButton;
     private Label? subtitleLabel;
     private Label? saveCountLabel;
+    private VBoxContainer? introContent;
+    private ScrollContainer? saveScroll;
     private VBoxContainer? saveList;
+    private VBoxContainer? homeContent;
+    private VBoxContainer? settingsContent;
+    private VBoxContainer? createWorldContent;
+    private LineEdit? worldNameInput;
+    private SpinBox? baseRadiusInput;
+    private SpinBox? heightVariationInput;
+    private SpinBox? worldSeedInput;
+    private Label? createWorldStatusLabel;
 
     public override void _Ready()
     {
+        random.Randomize();
         BuildMenu();
+        ResetNewWorldForm();
+        ShowIntroScreen();
         RefreshState();
     }
 
@@ -66,10 +81,10 @@ public partial class MainMenu : Control
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -360f,
-            OffsetTop = -250f,
-            OffsetRight = 360f,
-            OffsetBottom = 250f
+            OffsetLeft = -380f,
+            OffsetTop = -310f,
+            OffsetRight = 380f,
+            OffsetBottom = 310f
         };
         panel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
             new Color(0.08f, 0.10f, 0.14f, 0.96f),
@@ -106,9 +121,43 @@ public partial class MainMenu : Control
         subtitleLabel.AddThemeColorOverride("font_color", new Color(0.82f, 0.88f, 0.92f, 0.92f));
         layout.AddChild(subtitleLabel);
 
+        introContent = new VBoxContainer();
+        introContent.AddThemeConstantOverride("separation", 18);
+        layout.AddChild(introContent);
+
+        BuildIntroContent(introContent);
+
+        homeContent = new VBoxContainer();
+        homeContent.Visible = false;
+        homeContent.AddThemeConstantOverride("separation", 18);
+        layout.AddChild(homeContent);
+
+        BuildHomeContent(homeContent);
+
+        settingsContent = new VBoxContainer
+        {
+            Visible = false
+        };
+        settingsContent.AddThemeConstantOverride("separation", 16);
+        layout.AddChild(settingsContent);
+
+        BuildSettingsContent(settingsContent);
+
+        createWorldContent = new VBoxContainer
+        {
+            Visible = false
+        };
+        createWorldContent.AddThemeConstantOverride("separation", 16);
+        layout.AddChild(createWorldContent);
+
+        BuildCreateWorldContent(createWorldContent);
+    }
+
+    private void BuildHomeContent(VBoxContainer parent)
+    {
         HBoxContainer actionsRow = new();
         actionsRow.AddThemeConstantOverride("separation", 12);
-        layout.AddChild(actionsRow);
+        parent.AddChild(actionsRow);
 
         continueButton = new Button
         {
@@ -127,12 +176,12 @@ public partial class MainMenu : Control
             CustomMinimumSize = new Vector2(0f, 46f)
         };
         StyleSecondaryButton(newGameButton);
-        newGameButton.Pressed += StartNewGame;
+        newGameButton.Pressed += ShowCreateWorldScreen;
         actionsRow.AddChild(newGameButton);
 
         HBoxContainer savesHeader = new();
         savesHeader.AddThemeConstantOverride("separation", 8);
-        layout.AddChild(savesHeader);
+        parent.AddChild(savesHeader);
 
         Label savesLabel = new()
         {
@@ -157,7 +206,7 @@ public partial class MainMenu : Control
             new Color(0.34f, 0.44f, 0.52f, 0.28f),
             18,
             1));
-        layout.AddChild(savesPanel);
+        parent.AddChild(savesPanel);
 
         MarginContainer savesMargin = new();
         savesMargin.AddThemeConstantOverride("margin_left", 14);
@@ -178,19 +227,21 @@ public partial class MainMenu : Control
         savesHint.AddThemeColorOverride("font_color", new Color(0.74f, 0.80f, 0.86f, 0.78f));
         savesPanelLayout.AddChild(savesHint);
 
-        ScrollContainer savesScroll = new()
+        saveScroll = new ScrollContainer
         {
             CustomMinimumSize = new Vector2(0f, 230f),
             SizeFlagsVertical = SizeFlags.ExpandFill
         };
-        savesPanelLayout.AddChild(savesScroll);
+        saveScroll.Resized += QueueSaveListWidthRefresh;
+        savesPanelLayout.AddChild(saveScroll);
 
         saveList = new VBoxContainer();
         saveList.AddThemeConstantOverride("separation", 10);
-        savesScroll.AddChild(saveList);
+        saveList.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        saveScroll.AddChild(saveList);
 
         HBoxContainer footerRow = new();
-        layout.AddChild(footerRow);
+        parent.AddChild(footerRow);
 
         Button quitButton = new()
         {
@@ -202,6 +253,216 @@ public partial class MainMenu : Control
         footerRow.AddChild(quitButton);
     }
 
+    private void BuildIntroContent(VBoxContainer parent)
+    {
+        Control spacerTop = new()
+        {
+            CustomMinimumSize = new Vector2(0f, 36f)
+        };
+        parent.AddChild(spacerTop);
+
+        Label introTitle = new()
+        {
+            Text = "Main Menu",
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        introTitle.AddThemeFontSizeOverride("font_size", 24);
+        parent.AddChild(introTitle);
+
+        Label introHint = new()
+        {
+            Text = "Play opens the world manager. Settings and quit stay here on the front screen.",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart
+        };
+        introHint.AddThemeColorOverride("font_color", new Color(0.78f, 0.84f, 0.88f, 0.82f));
+        parent.AddChild(introHint);
+
+        Control spacerMiddle = new()
+        {
+            CustomMinimumSize = new Vector2(0f, 20f)
+        };
+        parent.AddChild(spacerMiddle);
+
+        Button playButton = new()
+        {
+            Text = "Play",
+            CustomMinimumSize = new Vector2(0f, 54f)
+        };
+        StylePrimaryButton(playButton);
+        playButton.Pressed += ShowHomeScreen;
+        parent.AddChild(playButton);
+
+        Button settingsButton = new()
+        {
+            Text = "Settings",
+            CustomMinimumSize = new Vector2(0f, 54f)
+        };
+        StyleSecondaryButton(settingsButton);
+        settingsButton.Pressed += ShowSettingsScreen;
+        parent.AddChild(settingsButton);
+
+        Button quitButton = new()
+        {
+            Text = "Quit",
+            CustomMinimumSize = new Vector2(0f, 54f)
+        };
+        StyleDangerButton(quitButton);
+        quitButton.Pressed += () => GetTree().Quit();
+        parent.AddChild(quitButton);
+    }
+
+    private void BuildSettingsContent(VBoxContainer parent)
+    {
+        Label sectionTitle = new()
+        {
+            Text = "Settings",
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        sectionTitle.AddThemeFontSizeOverride("font_size", 24);
+        parent.AddChild(sectionTitle);
+
+        PanelContainer panel = new();
+        panel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
+            new Color(0.10f, 0.13f, 0.18f, 0.90f),
+            new Color(0.34f, 0.44f, 0.52f, 0.30f),
+            18,
+            1));
+        parent.AddChild(panel);
+
+        MarginContainer margin = new();
+        margin.AddThemeConstantOverride("margin_left", 18);
+        margin.AddThemeConstantOverride("margin_top", 18);
+        margin.AddThemeConstantOverride("margin_right", 18);
+        margin.AddThemeConstantOverride("margin_bottom", 18);
+        panel.AddChild(margin);
+
+        Label settingsHint = new()
+        {
+            Text = "Settings screen placeholder. Add actual settings here next.",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart
+        };
+        settingsHint.AddThemeColorOverride("font_color", new Color(0.78f, 0.84f, 0.88f, 0.82f));
+        margin.AddChild(settingsHint);
+
+        HBoxContainer actions = new();
+        actions.AddThemeConstantOverride("separation", 12);
+        parent.AddChild(actions);
+
+        Button backButton = new()
+        {
+            Text = "Back",
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(0f, 46f)
+        };
+        StyleSecondaryButton(backButton);
+        backButton.Pressed += ShowIntroScreen;
+        actions.AddChild(backButton);
+    }
+
+    private void BuildCreateWorldContent(VBoxContainer parent)
+    {
+        Label sectionTitle = new()
+        {
+            Text = "Create World",
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        sectionTitle.AddThemeFontSizeOverride("font_size", 24);
+        parent.AddChild(sectionTitle);
+
+        Label hint = new()
+        {
+            Text = "Name the world and choose the planet settings before you start.",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart
+        };
+        hint.AddThemeColorOverride("font_color", new Color(0.78f, 0.84f, 0.88f, 0.82f));
+        parent.AddChild(hint);
+
+        PanelContainer formPanel = new();
+        formPanel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
+            new Color(0.10f, 0.13f, 0.18f, 0.90f),
+            new Color(0.34f, 0.44f, 0.52f, 0.30f),
+            18,
+            1));
+        parent.AddChild(formPanel);
+
+        MarginContainer formMargin = new();
+        formMargin.AddThemeConstantOverride("margin_left", 18);
+        formMargin.AddThemeConstantOverride("margin_top", 18);
+        formMargin.AddThemeConstantOverride("margin_right", 18);
+        formMargin.AddThemeConstantOverride("margin_bottom", 18);
+        formPanel.AddChild(formMargin);
+
+        VBoxContainer formLayout = new();
+        formLayout.AddThemeConstantOverride("separation", 12);
+        formMargin.AddChild(formLayout);
+
+        worldNameInput = new LineEdit
+        {
+            PlaceholderText = "World name"
+        };
+        formLayout.AddChild(CreateFieldBlock("World Name", worldNameInput));
+
+        baseRadiusInput = CreateSpinBox(6, 512, 50, 1, true);
+        formLayout.AddChild(CreateFieldBlock("Planet Base Size Radius In Blocks", baseRadiusInput));
+
+        heightVariationInput = CreateSpinBox(0, 64, 2.5f, 0.1f, false);
+        formLayout.AddChild(CreateFieldBlock("Height Variation In Blocks", heightVariationInput));
+
+        HBoxContainer seedRow = new();
+        seedRow.AddThemeConstantOverride("separation", 10);
+
+        worldSeedInput = CreateSpinBox(-999999999, 999999999, 1337, 1, true);
+        worldSeedInput.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        seedRow.AddChild(worldSeedInput);
+
+        Button randomSeedButton = new()
+        {
+            Text = "Randomize",
+            CustomMinimumSize = new Vector2(110f, 0f)
+        };
+        StyleSecondaryButton(randomSeedButton);
+        randomSeedButton.Pressed += RandomizeSeed;
+        seedRow.AddChild(randomSeedButton);
+
+        formLayout.AddChild(CreateFieldBlock("Planet Seed", seedRow));
+
+        createWorldStatusLabel = new Label
+        {
+            Text = "",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            Visible = false
+        };
+        createWorldStatusLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.52f, 0.55f, 1f));
+        parent.AddChild(createWorldStatusLabel);
+
+        HBoxContainer actions = new();
+        actions.AddThemeConstantOverride("separation", 12);
+        parent.AddChild(actions);
+
+        Button backButton = new()
+        {
+            Text = "Back",
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(0f, 46f)
+        };
+        StyleSecondaryButton(backButton);
+        backButton.Pressed += ShowHomeScreen;
+        actions.AddChild(backButton);
+
+        Button createButton = new()
+        {
+            Text = "Create World",
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(0f, 46f)
+        };
+        StylePrimaryButton(createButton);
+        createButton.Pressed += StartNewGameFromForm;
+        actions.AddChild(createButton);
+    }
+
     private void RefreshState()
     {
         List<SaveSlotInfo> saves = SaveGameManager.ListSaveSlots();
@@ -211,11 +472,17 @@ public partial class MainMenu : Control
             continueButton.Disabled = saves.Count == 0;
         }
 
-        if (subtitleLabel != null)
+        if (introContent?.Visible == true && subtitleLabel != null)
+        {
+            subtitleLabel.Text = saves.Count > 0
+                ? "Start from the front screen, then open your worlds."
+                : "Start from the front screen, then create your first world.";
+        }
+        else if (homeContent?.Visible == true && subtitleLabel != null)
         {
             subtitleLabel.Text = saves.Count > 0
                 ? "Continue loads the newest save.\nYou can also pick any save from the list below."
-                : "No saves found yet.\nStart a new game and save from the pause menu or with F5.";
+                : "No saves found yet.\nStart a new world and save from the pause menu or with F5.";
         }
 
         if (saveCountLabel != null)
@@ -224,6 +491,7 @@ public partial class MainMenu : Control
         }
 
         RebuildSaveList(saves);
+        QueueSaveListWidthRefresh();
     }
 
     private void RebuildSaveList(List<SaveSlotInfo> saves)
@@ -241,6 +509,7 @@ public partial class MainMenu : Control
         if (saves.Count == 0)
         {
             PanelContainer emptyCard = new();
+            emptyCard.SizeFlagsHorizontal = SizeFlags.ExpandFill;
             emptyCard.AddThemeStyleboxOverride("panel", CreatePanelStyle(
                 new Color(0.12f, 0.14f, 0.18f, 0.92f),
                 new Color(0.30f, 0.38f, 0.46f, 0.25f),
@@ -257,7 +526,7 @@ public partial class MainMenu : Control
 
             Label emptyLabel = new()
             {
-                Text = "No saves yet.\nCreate a new game, then save from the pause menu or with F5.",
+                Text = "No saves yet.\nCreate a new world, then save from the pause menu or with F5.",
                 HorizontalAlignment = HorizontalAlignment.Center,
                 AutowrapMode = TextServer.AutowrapMode.WordSmart
             };
@@ -272,6 +541,7 @@ public partial class MainMenu : Control
             bool isLatest = index == 0;
 
             PanelContainer rowPanel = new();
+            rowPanel.SizeFlagsHorizontal = SizeFlags.ExpandFill;
             rowPanel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
                 isLatest
                     ? new Color(0.13f, 0.18f, 0.14f, 0.96f)
@@ -355,6 +625,185 @@ public partial class MainMenu : Control
         }
     }
 
+    private void ShowHomeScreen()
+    {
+        if (introContent != null)
+        {
+            introContent.Visible = false;
+        }
+
+        if (homeContent != null)
+        {
+            homeContent.Visible = true;
+        }
+
+        if (settingsContent != null)
+        {
+            settingsContent.Visible = false;
+        }
+
+        if (createWorldContent != null)
+        {
+            createWorldContent.Visible = false;
+        }
+
+        RefreshState();
+    }
+
+    private void ShowIntroScreen()
+    {
+        if (introContent != null)
+        {
+            introContent.Visible = true;
+        }
+
+        if (homeContent != null)
+        {
+            homeContent.Visible = false;
+        }
+
+        if (settingsContent != null)
+        {
+            settingsContent.Visible = false;
+        }
+
+        if (createWorldContent != null)
+        {
+            createWorldContent.Visible = false;
+        }
+
+        RefreshState();
+    }
+
+    private void ShowSettingsScreen()
+    {
+        if (introContent != null)
+        {
+            introContent.Visible = false;
+        }
+
+        if (homeContent != null)
+        {
+            homeContent.Visible = false;
+        }
+
+        if (settingsContent != null)
+        {
+            settingsContent.Visible = true;
+        }
+
+        if (createWorldContent != null)
+        {
+            createWorldContent.Visible = false;
+        }
+
+        if (subtitleLabel != null)
+        {
+            subtitleLabel.Text = "Adjust the game options here.";
+        }
+    }
+
+    private void ShowCreateWorldScreen()
+    {
+        if (introContent != null)
+        {
+            introContent.Visible = false;
+        }
+
+        if (homeContent != null)
+        {
+            homeContent.Visible = false;
+        }
+
+        if (settingsContent != null)
+        {
+            settingsContent.Visible = false;
+        }
+
+        if (createWorldContent != null)
+        {
+            createWorldContent.Visible = true;
+        }
+
+        if (subtitleLabel != null)
+        {
+            subtitleLabel.Text = "Set the world name, planet radius, terrain height, and seed.";
+        }
+
+        SetCreateWorldStatus("");
+        worldNameInput?.GrabFocus();
+    }
+
+    private void ResetNewWorldForm()
+    {
+        if (worldNameInput != null)
+        {
+            worldNameInput.Text = "New World";
+        }
+
+        if (baseRadiusInput != null)
+        {
+            baseRadiusInput.Value = 50;
+        }
+
+        if (heightVariationInput != null)
+        {
+            heightVariationInput.Value = 2.5f;
+        }
+
+        if (worldSeedInput != null)
+        {
+            worldSeedInput.Value = 1337;
+        }
+
+        SetCreateWorldStatus("");
+    }
+
+    private void StartNewGameFromForm()
+    {
+        if (worldNameInput is null || baseRadiusInput is null || heightVariationInput is null || worldSeedInput is null)
+        {
+            return;
+        }
+
+        string saveName = worldNameInput.Text.Trim();
+        if (string.IsNullOrWhiteSpace(saveName))
+        {
+            SetCreateWorldStatus("World name is required.");
+            return;
+        }
+
+        SaveGameManager.BeginNewGame(new NewGameOptions
+        {
+            SaveName = saveName,
+            BaseRadiusInBlocks = Mathf.RoundToInt((float)baseRadiusInput.Value),
+            HeightVariationInBlocks = (float)heightVariationInput.Value,
+            WorldSeed = Mathf.RoundToInt((float)worldSeedInput.Value)
+        });
+        GetTree().ChangeSceneToFile(GameScenePath);
+    }
+
+    private void RandomizeSeed()
+    {
+        if (worldSeedInput == null)
+        {
+            return;
+        }
+
+        worldSeedInput.Value = random.RandiRange(-999999999, 999999999);
+    }
+
+    private void SetCreateWorldStatus(string message)
+    {
+        if (createWorldStatusLabel == null)
+        {
+            return;
+        }
+
+        createWorldStatusLabel.Text = message;
+        createWorldStatusLabel.Visible = !string.IsNullOrWhiteSpace(message);
+    }
+
     private void ContinueLatestSave()
     {
         List<SaveSlotInfo> saves = SaveGameManager.ListSaveSlots();
@@ -379,10 +828,55 @@ public partial class MainMenu : Control
         RefreshState();
     }
 
-    private void StartNewGame()
+    private void QueueSaveListWidthRefresh()
     {
-        SaveGameManager.BeginNewGame();
-        GetTree().ChangeSceneToFile(GameScenePath);
+        CallDeferred(nameof(RefreshSaveListWidth));
+    }
+
+    private void RefreshSaveListWidth()
+    {
+        if (saveScroll is null || saveList is null)
+        {
+            return;
+        }
+
+        float viewportWidth = saveScroll.Size.X;
+        VScrollBar? verticalScrollBar = saveScroll.GetVScrollBar();
+        if (verticalScrollBar != null && verticalScrollBar.Visible)
+        {
+            viewportWidth -= verticalScrollBar.Size.X;
+        }
+
+        saveList.CustomMinimumSize = new Vector2(Mathf.Max(0f, viewportWidth), saveList.CustomMinimumSize.Y);
+    }
+
+    private static SpinBox CreateSpinBox(double minValue, double maxValue, double value, double step, bool rounded)
+    {
+        return new SpinBox
+        {
+            MinValue = minValue,
+            MaxValue = maxValue,
+            Value = value,
+            Step = step,
+            Rounded = rounded,
+            SelectAllOnFocus = true,
+            SizeFlagsHorizontal = SizeFlags.ExpandFill
+        };
+    }
+
+    private static VBoxContainer CreateFieldBlock(string labelText, Control control)
+    {
+        VBoxContainer field = new();
+        field.AddThemeConstantOverride("separation", 6);
+
+        Label label = new()
+        {
+            Text = labelText
+        };
+        label.AddThemeColorOverride("font_color", new Color(0.82f, 0.88f, 0.92f, 0.92f));
+        field.AddChild(label);
+        field.AddChild(control);
+        return field;
     }
 
     private static StyleBoxFlat CreatePanelStyle(Color bgColor, Color borderColor, int cornerRadius, int borderWidth)

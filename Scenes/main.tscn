@@ -20,8 +20,10 @@ environment = SubResource("Environment_q2ekf")
 
 [node name="World" type="Node3D" parent="." unique_id=1281627882]
 script = ExtResource("1_a4wja")
+BaseRadiusInBlocks = 50
 DistortionOptimizedRotationEuler = Vector3(0, 0, 0)
 BlockSize = 1.0
+GenerateOnReady = false
 UseDebugColors = false
 
 [node name="Sun" type="DirectionalLight3D" parent="." unique_id=837703078]

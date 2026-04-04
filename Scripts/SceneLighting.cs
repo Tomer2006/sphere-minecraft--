@@ -9,7 +9,11 @@ public partial class SceneLighting : Node3D
     [Export] public Vector3 SunRotationDegrees { get; set; } = new(50f, -30f, 0f);
     [Export] public float SunEnergy { get; set; } = 1.15f;
     [Export] public Color SunColor { get; set; } = new(1.0f, 0.95f, 0.86f);
+    [Export] public float SunIndirectEnergy { get; set; } = 1.35f;
     [Export] public float SkyExposure { get; set; } = 1.0f;
+    [Export] public float AmbientLightEnergy { get; set; } = 0.85f;
+    [Export] public float AmbientLightSkyContribution { get; set; } = 0.75f;
+    [Export] public Color AmbientLightColor { get; set; } = new(0.78f, 0.84f, 0.94f);
     [Export] public float FogDensity { get; set; } = 0.0018f;
 
     public override void _Ready()
@@ -48,7 +52,9 @@ public partial class SceneLighting : Node3D
             Sky = sky,
             SkyCustomFov = 50.0f,
             AmbientLightSource = Environment.AmbientSource.Sky,
-            AmbientLightSkyContribution = 1.0f,
+            AmbientLightColor = AmbientLightColor,
+            AmbientLightEnergy = AmbientLightEnergy,
+            AmbientLightSkyContribution = AmbientLightSkyContribution,
             ReflectedLightSource = Environment.ReflectionSource.Sky,
             TonemapMode = Environment.ToneMapper.Aces,
             TonemapExposure = SkyExposure,
@@ -75,7 +81,7 @@ public partial class SceneLighting : Node3D
             sun.RotationDegrees = SunRotationDegrees;
             sun.LightColor = SunColor;
             sun.LightEnergy = SunEnergy;
-            sun.LightIndirectEnergy = 1.0f;
+            sun.LightIndirectEnergy = SunIndirectEnergy;
             sun.ShadowEnabled = true;
             sun.ShadowBias = 0.05f;
             sun.ShadowNormalBias = 1.0f;
