@@ -322,25 +322,6 @@ public partial class PlanetVoxelWorld : Node3D
         return TryGetAdjacentCell(hitInfo.Cell, hitInfo.Face, out targetCell);
     }
 
-    public Vector3 GetSurfaceSpawnPosition(Vector3 desiredDirection, float extraHeight)
-    {
-        Vector3 direction = desiredDirection.LengthSquared() > 0.0001f ? desiredDirection.Normalized() : Vector3.Up;
-        WrappedColumn column = ProjectDirectionToColumn(direction, faceResolution);
-        Vector3 surfaceDirection = GetDirectionForCellCenterStatic(column.Face, column.U, column.V, faceResolution, FaceCoordinateUniformity, PolynomialWarpBias);
-        int surfaceHeight = GetDefaultColumnHeight(column.Face, column.U, column.V);
-        return PlanetCenter + surfaceDirection * (surfaceHeight * BlockSize + extraHeight);
-    }
-
-    public void PrepareAreaAroundPosition(Vector3 worldPosition)
-    {
-        EnsureRuntimeNodes();
-        ConfigureNoise();
-        ConfigureMaterial();
-        ChunkAnchor anchor = GetAnchorFromWorldPosition(worldPosition);
-        currentAnchor = anchor;
-        SyncActiveChunks(anchor, buildImmediately: true);
-    }
-
     private void RebuildPlanet()
     {
         EnsureRuntimeNodes();

@@ -378,7 +378,7 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		AttachOrCreateCamera();
 
-		GlobalPosition = world.GetSurfaceSpawnPosition(Vector3.Up, spawnHeightOffset);
+		GlobalPosition = world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset);
 		Velocity = Vector3.Zero;
 
 		Vector3 upAxis = GetUpAxis();
