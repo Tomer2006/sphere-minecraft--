@@ -239,6 +239,10 @@ public sealed class NewGameOptions
     public int BaseRadiusInBlocks { get; set; } = 50;
     public float HeightVariationInBlocks { get; set; } = 2.5f;
     public int WorldSeed { get; set; } = 1337;
+    public float FaceCoordinateUniformity { get; set; } = 0.4f;
+    public float PolynomialWarpBias { get; set; } = 0.6f;
+    public Vector3Save DistortionOptimizedRotationEuler { get; set; } = new();
+    public float LocalCellDeformation { get; set; } = 0.9f;
 
     public static NewGameOptions CreateDefault()
     {
@@ -252,7 +256,10 @@ public sealed class WorldSaveData
     public float HeightVariationInBlocks { get; set; }
     public float NoiseScale { get; set; }
     public int WorldSeed { get; set; }
+    public float FaceCoordinateUniformity { get; set; } = 0.4f;
+    public float PolynomialWarpBias { get; set; } = 0.6f;
     public Vector3Save DistortionOptimizedRotationEuler { get; set; } = new();
+    public float LocalCellDeformation { get; set; } = 0.9f;
     public float BlockSize { get; set; }
     public bool UseDebugColors { get; set; }
     public bool CullFacesAgainstNeighborBlocks { get; set; }

@@ -22,6 +22,9 @@ public partial class MainMenu : Control
     private SpinBox? baseRadiusInput;
     private SpinBox? heightVariationInput;
     private SpinBox? worldSeedInput;
+    private SpinBox? faceUniformityInput;
+    private SpinBox? warpBiasInput;
+    private SpinBox? localDeformationInput;
     private Label? createWorldStatusLabel;
 
     public override void _Ready()
@@ -373,7 +376,7 @@ public partial class MainMenu : Control
 
         Label hint = new()
         {
-            Text = "Name the world and choose the planet settings before you start.",
+            Text = "Name the world and choose the wrapped-cube planet settings before you start.",
             HorizontalAlignment = HorizontalAlignment.Center,
             AutowrapMode = TextServer.AutowrapMode.WordSmart
         };
@@ -405,11 +408,28 @@ public partial class MainMenu : Control
         };
         formLayout.AddChild(CreateFieldBlock("World Name", worldNameInput));
 
-        baseRadiusInput = CreateSpinBox(6, 512, 50, 1, true);
+        baseRadiusInput = CreateSpinBox(6, 5000, 50, 1, true);
         formLayout.AddChild(CreateFieldBlock("Planet Base Size Radius In Blocks", baseRadiusInput));
 
         heightVariationInput = CreateSpinBox(0, 64, 2.5f, 0.1f, false);
         formLayout.AddChild(CreateFieldBlock("Height Variation In Blocks", heightVariationInput));
+
+        Label mappingLabel = new()
+        {
+            Text = "Adjusted Spherical Cube (ASC) with wrapped cube faces",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart
+        };
+        mappingLabel.AddThemeColorOverride("font_color", new Color(0.84f, 0.91f, 0.94f, 0.92f));
+        formLayout.AddChild(CreateFieldBlock("Spherical Mapping Technique", mappingLabel));
+
+        faceUniformityInput = CreateSpinBox(0, 1, 0.4f, 0.01f, false);
+        formLayout.AddChild(CreateFieldBlock("ASC Face Coordinate Uniformity", faceUniformityInput));
+
+        warpBiasInput = CreateSpinBox(0, 1, 0.6f, 0.01f, false);
+        formLayout.AddChild(CreateFieldBlock("ASC Polynomial Warp Bias", warpBiasInput));
+
+        localDeformationInput = CreateSpinBox(0, 1, 0.9f, 0.01f, false);
+        formLayout.AddChild(CreateFieldBlock("Wrapped Cell Deformation", localDeformationInput));
 
         HBoxContainer seedRow = new();
         seedRow.AddThemeConstantOverride("separation", 10);
@@ -727,7 +747,7 @@ public partial class MainMenu : Control
 
         if (subtitleLabel != null)
         {
-            subtitleLabel.Text = "Set the world name, planet radius, terrain height, and seed.";
+            subtitleLabel.Text = "Set the world name, wrapped cube radius, ASC tuning, terrain height, and seed.";
         }
 
         SetCreateWorldStatus("");
@@ -756,12 +776,33 @@ public partial class MainMenu : Control
             worldSeedInput.Value = 1337;
         }
 
+        if (faceUniformityInput != null)
+        {
+            faceUniformityInput.Value = 0.4f;
+        }
+
+        if (warpBiasInput != null)
+        {
+            warpBiasInput.Value = 0.6f;
+        }
+
+        if (localDeformationInput != null)
+        {
+            localDeformationInput.Value = 0.9f;
+        }
+
         SetCreateWorldStatus("");
     }
 
     private void StartNewGameFromForm()
     {
-        if (worldNameInput is null || baseRadiusInput is null || heightVariationInput is null || worldSeedInput is null)
+        if (worldNameInput is null ||
+            baseRadiusInput is null ||
+            heightVariationInput is null ||
+            worldSeedInput is null ||
+            faceUniformityInput is null ||
+            warpBiasInput is null ||
+            localDeformationInput is null)
         {
             return;
         }
@@ -778,7 +819,11 @@ public partial class MainMenu : Control
             SaveName = saveName,
             BaseRadiusInBlocks = Mathf.RoundToInt((float)baseRadiusInput.Value),
             HeightVariationInBlocks = (float)heightVariationInput.Value,
-            WorldSeed = Mathf.RoundToInt((float)worldSeedInput.Value)
+            WorldSeed = Mathf.RoundToInt((float)worldSeedInput.Value),
+            FaceCoordinateUniformity = (float)faceUniformityInput.Value,
+            PolynomialWarpBias = (float)warpBiasInput.Value,
+            LocalCellDeformation = (float)localDeformationInput.Value,
+            DistortionOptimizedRotationEuler = new Vector3Save()
         });
         GetTree().ChangeSceneToFile(GameScenePath);
     }

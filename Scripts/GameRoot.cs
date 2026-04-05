@@ -82,6 +82,10 @@ public partial class GameRoot : SceneLighting
             world.BaseRadiusInBlocks = options.BaseRadiusInBlocks;
             world.HeightVariationInBlocks = options.HeightVariationInBlocks;
             world.WorldSeed = options.WorldSeed;
+            world.FaceCoordinateUniformity = options.FaceCoordinateUniformity;
+            world.PolynomialWarpBias = options.PolynomialWarpBias;
+            world.DistortionOptimizedRotationEuler = options.DistortionOptimizedRotationEuler.ToVector3();
+            world.LocalCellDeformation = options.LocalCellDeformation;
             world.GeneratePlanet();
 
             UpdateSaveStatus("Created " + SaveGameManager.CurrentSaveName + ". Press F5 to create a save.");

@@ -7,4 +7,10 @@
     <RootNamespace>SphereMinecraft</RootNamespace>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="old unity code\\**\\*.cs" />
+    <EmbeddedResource Remove="old unity code\\**\\*" />
+    <None Remove="old unity code\\**\\*" />
+  </ItemGroup>
 </Project>

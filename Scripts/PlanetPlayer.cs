@@ -19,20 +19,20 @@ public partial class PlanetPlayer : CustomRigidBody
 	private float airControl = 0.35f;
 	private float gravityStrength = 30f;
 	private float jumpSpeed = 11f;
-	private float groundedStickSpeed = 0.6f;
-	private float groundProbeDistance = 0.18f;
+	private float groundedStickSpeed = 0.2f;
+	private float groundProbeDistance = 0.08f;
 	private float groundMinDot = 0.35f;
 	private float coyoteTime = 0.12f;
 	private float jumpBufferTime = 0.15f;
-	private float jumpGroundingLockTime = 0.1f;
-	private float jumpTakeoffDistance = 0.08f;
+	private float jumpGroundingLockTime = 0.18f;
+	private float jumpTakeoffDistance = 0.16f;
 
 	private float mouseSensitivity = 0.14f;
 	private float minPitch = -89f;
 	private float maxPitch = 89f;
 	private float lookDeadzone = 0.01f;
 
-	private float upSmoothingTime = 0.08f;
+	private float upSmoothingTime = 0.05f;
 	private float interactDistance = 8f;
 	private VoxelBlockType selectedBlock = VoxelBlockType.Grass;
 
@@ -378,7 +378,8 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		AttachOrCreateCamera();
 
-		GlobalPosition = world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset);
+		GlobalPosition = world.GetSurfaceSpawnPosition(Vector3.Up, spawnHeightOffset);
+		Velocity = Vector3.Zero;
 
 		Vector3 upAxis = GetUpAxis();
 		smoothedUp = upAxis;
@@ -421,6 +422,8 @@ public partial class PlanetPlayer : CustomRigidBody
 		{
 			return;
 		}
+
+		body.BeginPhysicsStep(deltaTime);
 
 		Vector3 rawUp = GetUpAxis();
 		float smoothingTime = Mathf.Max(upSmoothingTime, 0.0001f);
@@ -576,7 +579,7 @@ public partial class PlanetPlayer : CustomRigidBody
 		{
 			if (verticalSpeed < 0f)
 			{
-				verticalSpeed = -groundedStickSpeed;
+				verticalSpeed = 0f;
 			}
 
 			if (canJump)

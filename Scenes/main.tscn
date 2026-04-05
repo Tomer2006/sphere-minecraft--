@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://c2dr2sralwx41"]
 
-[ext_resource type="Script" uid="uid://bsexnptopgna0" path="res://Scripts/PlanetVoxelWorld.cs" id="1_a4wja"]
+[ext_resource type="Script" uid="uid://bwih0evm0p4lf" path="res://Scripts/PlanetVoxelWorld.cs" id="1_a4wja"]
 [ext_resource type="Script" uid="uid://bx1fnwyh6kw2d" path="res://Scripts/PlanetPlayer.cs" id="2_hpj0g"]
 [ext_resource type="Script" uid="uid://dfu1smj8svfmf" path="res://Scripts/GameRoot.cs" id="3_5q8sr"]
 
@@ -20,11 +20,6 @@ environment = SubResource("Environment_q2ekf")
 
 [node name="World" type="Node3D" parent="." unique_id=1281627882]
 script = ExtResource("1_a4wja")
-BaseRadiusInBlocks = 50
-DistortionOptimizedRotationEuler = Vector3(0, 0, 0)
-BlockSize = 1.0
-GenerateOnReady = false
-UseDebugColors = false
 
 [node name="Sun" type="DirectionalLight3D" parent="." unique_id=837703078]
 process_mode = 3
@@ -37,6 +32,7 @@ shadow_normal_bias = 1.0
 [node name="Player" type="CharacterBody3D" parent="." unique_id=2124311118]
 slide_on_ceiling = false
 script = ExtResource("2_hpj0g")
+SpawnHeightOffset = 50.0
 GroundMinDot = 0.3
 MaxDepenetrationIterations = 2
 CollisionMaskBits = 1

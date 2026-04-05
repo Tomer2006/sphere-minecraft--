@@ -1,1563 +1,1464 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using Godot;
 
 namespace SphereMinecraft;
 
 public partial class PlanetVoxelWorld : Node3D
 {
-        private const float SurfaceContinuationTolerance = 0.8f;
-        private static readonly Vector3I PositiveZ = new(0, 0, 1);
-        private static readonly Vector3I NegativeZ = new(0, 0, -1);
-        private static readonly VoxelBlockType[] RenderBlockTypes =
-        {
-            VoxelBlockType.Grass,
-            VoxelBlockType.Dirt,
-            VoxelBlockType.Stone
-        };
+    private const int AtlasTileSize = 48;
+    private const int AtlasGridSize = 2;
+    private const int AtlasPaddingPixels = 2;
+    private const int DefaultFarShellResolution = 40;
+    private const int MaxCompletedBuildsPerFrame = 4;
 
-        private static readonly Vector3I[] LocalFaceDirections =
-        {
-            Vector3I.Right,
-            Vector3I.Left,
-            Vector3I.Up,
-            Vector3I.Down,
-            PositiveZ,
-            NegativeZ
-        };
+    private static readonly Vector3[] FaceNormals =
+    [
+        Vector3.Right,
+        Vector3.Left,
+        Vector3.Up,
+        Vector3.Down,
+        Vector3.Back,
+        Vector3.Forward
+    ];
 
-        private static readonly Vector3[][] FaceVertices =
+    private static readonly Vector3[] FaceAxisU =
+    [
+        new Vector3(0f, 0f, -1f),
+        new Vector3(0f, 0f, 1f),
+        Vector3.Right,
+        Vector3.Right,
+        Vector3.Right,
+        Vector3.Left
+    ];
+
+    private static readonly Vector3[] FaceAxisV =
+    [
+        Vector3.Up,
+        Vector3.Up,
+        new Vector3(0f, 0f, -1f),
+        Vector3.Forward,
+        Vector3.Up,
+        Vector3.Up
+    ];
+
+    private readonly Dictionary<PlanetCellId, VoxelBlockType> placedBlocks = [];
+    private readonly HashSet<PlanetCellId> removedCells = [];
+    private readonly Dictionary<long, int> defaultColumnHeights = [];
+    private readonly Dictionary<ChunkKey, PlanetChunk> chunks = [];
+    private readonly Dictionary<ulong, PlanetChunk> chunkBodiesById = [];
+    private readonly Dictionary<ChunkKey, int> latestRequestedRevisions = [];
+    private readonly Dictionary<VoxelBlockType, Rect2> atlasUvRects = [];
+    private readonly ConcurrentQueue<ChunkBuildResult> completedBuilds = new();
+    private readonly HashSet<ChunkKey> activeRenderChunks = [];
+    private readonly HashSet<ChunkKey> activeCollisionChunks = [];
+    private readonly object worldDataLock = new();
+
+    private Node3D? chunkRoot;
+    private MeshInstance3D? farShellMesh;
+    private PlanetPlayer? trackedPlayer;
+    private FastNoiseLite? noise;
+    private StandardMaterial3D? planetMaterial;
+    private Texture2D? atlasTexture;
+    private ChunkAnchor? currentAnchor;
+    private int faceResolution = 100;
+    private int buildRevisionCounter;
+
+    [ExportGroup("References")]
+    [Export] public NodePath PlayerPath { get; set; } = new("../Player");
+
+    [ExportGroup("Planet Shape")]
+    [Export] public int BaseRadiusInBlocks { get; set; } = 50;
+    [Export] public float HeightVariationInBlocks { get; set; } = 2.5f;
+    [Export] public float NoiseScale { get; set; } = 1.8f;
+    [Export] public int WorldSeed { get; set; } = 1337;
+    [Export(PropertyHint.Range, "0,1,0.01")] public float FaceCoordinateUniformity { get; set; } = 0.4f;
+    [Export(PropertyHint.Range, "0,1,0.01")] public float PolynomialWarpBias { get; set; } = 0.6f;
+    [Export] public Vector3 DistortionOptimizedRotationEuler { get; set; } = Vector3.Zero;
+    [Export(PropertyHint.Range, "0,1,0.01")] public float LocalCellDeformation { get; set; } = 0.9f;
+    [Export] public float BlockSize { get; set; } = 1f;
+    [Export] public bool GenerateOnReady { get; set; }
+
+    [ExportGroup("Chunk Streaming")]
+    [Export(PropertyHint.Range, "8,64,1")] public int ChunkSizeInCells { get; set; } = 24;
+    [Export(PropertyHint.Range, "1,16,1")] public int ActiveRenderChunkRadius { get; set; } = 6;
+    [Export(PropertyHint.Range, "1,8,1")] public int ActiveCollisionChunkRadius { get; set; } = 2;
+    [Export(PropertyHint.Range, "2,64,1")] public int SurfaceShellDepthInBlocks { get; set; } = 12;
+    [Export(PropertyHint.Range, "1,12,1")] public int ExtraOutwardBlocks { get; set; } = 2;
+    [Export(PropertyHint.Range, "8,96,1")] public int FarShellFaceResolution { get; set; } = DefaultFarShellResolution;
+
+    [ExportGroup("Rendering")]
+    [Export] public bool UseDebugColors { get; set; }
+    [Export] public bool CullFacesAgainstNeighborBlocks { get; set; } = true;
+
+    public Vector3 PlanetCenter => GlobalPosition;
+
+    public float ApproximateSurfaceRadius => (BaseRadiusInBlocks + HeightVariationInBlocks + 1f) * BlockSize;
+
+    public override void _Ready()
+    {
+        EnsureRuntimeNodes();
+
+        if (GenerateOnReady)
         {
-            new[]
+            CallDeferred(nameof(GeneratePlanet));
+        }
+    }
+
+    public override void _Process(double delta)
+    {
+        ApplyCompletedBuilds();
+        UpdateStreaming();
+    }
+
+    public void GeneratePlanet()
+    {
+        lock (worldDataLock)
+        {
+            placedBlocks.Clear();
+            removedCells.Clear();
+            defaultColumnHeights.Clear();
+        }
+
+        RebuildPlanet();
+    }
+
+    public void LoadFromSave(WorldSaveData data)
+    {
+        BaseRadiusInBlocks = Mathf.Max(2, data.BaseRadiusInBlocks);
+        HeightVariationInBlocks = Mathf.Max(0f, data.HeightVariationInBlocks);
+        NoiseScale = Mathf.Max(0.01f, data.NoiseScale);
+        WorldSeed = data.WorldSeed;
+        FaceCoordinateUniformity = Mathf.Clamp(data.FaceCoordinateUniformity, 0f, 1f);
+        PolynomialWarpBias = Mathf.Clamp(data.PolynomialWarpBias, 0f, 1f);
+        DistortionOptimizedRotationEuler = data.DistortionOptimizedRotationEuler.ToVector3();
+        LocalCellDeformation = Mathf.Clamp(data.LocalCellDeformation, 0f, 1f);
+        BlockSize = Mathf.Max(0.1f, data.BlockSize);
+        UseDebugColors = data.UseDebugColors;
+        CullFacesAgainstNeighborBlocks = data.CullFacesAgainstNeighborBlocks;
+        ChunkSizeInCells = Mathf.Max(8, data.ChunkSizeInCells);
+
+        lock (worldDataLock)
+        {
+            placedBlocks.Clear();
+            removedCells.Clear();
+            defaultColumnHeights.Clear();
+
+            foreach (BlockEntrySave entry in data.Blocks)
             {
-                new Vector3(0.5f, -0.5f, -0.5f),
-                new Vector3(0.5f, 0.5f, -0.5f),
-                new Vector3(0.5f, 0.5f, 0.5f),
-                new Vector3(0.5f, -0.5f, 0.5f)
-            },
-            new[]
-            {
-                new Vector3(-0.5f, -0.5f, 0.5f),
-                new Vector3(-0.5f, 0.5f, 0.5f),
-                new Vector3(-0.5f, 0.5f, -0.5f),
-                new Vector3(-0.5f, -0.5f, -0.5f)
-            },
-            new[]
-            {
-                new Vector3(-0.5f, 0.5f, -0.5f),
-                new Vector3(-0.5f, 0.5f, 0.5f),
-                new Vector3(0.5f, 0.5f, 0.5f),
-                new Vector3(0.5f, 0.5f, -0.5f)
-            },
-            new[]
-            {
-                new Vector3(-0.5f, -0.5f, 0.5f),
-                new Vector3(-0.5f, -0.5f, -0.5f),
-                new Vector3(0.5f, -0.5f, -0.5f),
-                new Vector3(0.5f, -0.5f, 0.5f)
-            },
-            new[]
-            {
-                new Vector3(0.5f, -0.5f, 0.5f),
-                new Vector3(0.5f, 0.5f, 0.5f),
-                new Vector3(-0.5f, 0.5f, 0.5f),
-                new Vector3(-0.5f, -0.5f, 0.5f)
-            },
-            new[]
-            {
-                new Vector3(-0.5f, -0.5f, -0.5f),
-                new Vector3(-0.5f, 0.5f, -0.5f),
-                new Vector3(0.5f, 0.5f, -0.5f),
-                new Vector3(0.5f, -0.5f, -0.5f)
+                placedBlocks[entry.Cell.ToCell()] = (VoxelBlockType)entry.BlockType;
             }
-        };
 
-        private static readonly Vector2[] FaceUvs =
-        {
-            new(0f, 0f),
-            new(0f, 1f),
-            new(1f, 1f),
-            new(1f, 0f)
-        };
-
-        private static readonly CubeFace[] CubeFaces =
-        {
-            new(Vector3I.Right, PositiveZ, Vector3I.Up),
-            new(Vector3I.Left, NegativeZ, Vector3I.Up),
-            new(Vector3I.Up, Vector3I.Right, PositiveZ),
-            new(Vector3I.Down, Vector3I.Right, NegativeZ),
-            new(PositiveZ, Vector3I.Left, Vector3I.Up),
-            new(NegativeZ, Vector3I.Right, Vector3I.Up)
-        };
-
-        private int baseRadiusInBlocks = 24;
-        private float heightVariationInBlocks = 2.5f;
-        private float noiseScale = 1.8f;
-        private int worldSeed = 1337;
-        private Vector3 distortionOptimizedRotationEuler = new(27f, -41f, 19f);
-        private float blockSize = 0.6f;
-        private bool generateOnAwake = true;
-        private Material? overrideMaterial;
-        private Texture2D? grassTexture;
-        private Texture2D? dirtTexture;
-        private Texture2D? stoneTexture;
-        private bool useDebugColors = true;
-        private bool cullFacesAgainstNeighborBlocks = true;
-        private int chunkSizeInCells = 12;
-        private int atlasPaddingPixels = 2;
-        private int fallbackTextureSize = 16;
-
-        private readonly Dictionary<PlanetCellId, VoxelBlockType> blocks = new();
-        private readonly HashSet<PlanetCellId> removedTerrainCells = new();
-        private readonly Dictionary<ChunkId, ChunkSection> chunks = new();
-        private readonly Dictionary<ChunkId, HashSet<PlanetCellId>> cellsByChunk = new();
-        private readonly Dictionary<CollisionObject3D, ChunkRenderSection> renderSectionByCollider = new();
-        private readonly Dictionary<VoxelBlockType, AtlasRegion> atlasRegions = new();
-        private readonly Color[] faceDebugColors = new Color[CubeFaces.Length];
-        private bool generated;
-        private Basis distortionOptimizedRotation = Basis.Identity;
-        private Basis inverseDistortionOptimizedRotation = Basis.Identity;
-        private Material? atlasMaterial;
-        private Texture2D? atlasTexture;
-
-        [ExportGroup("Planet Shape")]
-        [Export(PropertyHint.Range, "6,512,1")]
-        public int BaseRadiusInBlocks
-        {
-            get => baseRadiusInBlocks;
-            set => baseRadiusInBlocks = value;
-        }
-
-        [Export(PropertyHint.Range, "0,64,0.1")]
-        public float HeightVariationInBlocks
-        {
-            get => heightVariationInBlocks;
-            set => heightVariationInBlocks = value;
-        }
-
-        [Export(PropertyHint.Range, "0.1,32,0.1")]
-        public float NoiseScale
-        {
-            get => noiseScale;
-            set => noiseScale = value;
-        }
-
-        [Export]
-        public int WorldSeed
-        {
-            get => worldSeed;
-            set => worldSeed = value;
-        }
-
-        [Export]
-        public Vector3 DistortionOptimizedRotationEuler
-        {
-            get => distortionOptimizedRotationEuler;
-            set => distortionOptimizedRotationEuler = value;
-        }
-
-        [ExportGroup("Blocks")]
-        [Export(PropertyHint.Range, "0.25,8,0.05")]
-        public float BlockSize
-        {
-            get => blockSize;
-            set => blockSize = value;
-        }
-
-        [Export]
-        public bool GenerateOnReady
-        {
-            get => generateOnAwake;
-            set => generateOnAwake = value;
-        }
-
-        [ExportGroup("Rendering")]
-        [Export]
-        public Material? OverrideMaterial
-        {
-            get => overrideMaterial;
-            set
+            foreach (CellSave entry in data.RemovedCells)
             {
-                overrideMaterial = value;
-                InvalidateAtlasResources();
+                removedCells.Add(entry.ToCell());
             }
         }
 
-        [ExportGroup("Textures")]
-        [Export]
-        public Texture2D? GrassTexture
+        RebuildPlanet();
+    }
+
+    public WorldSaveData CreateSaveData()
+    {
+        List<BlockEntrySave> blockSaves = [];
+        List<CellSave> removedCellSaves = [];
+
+        lock (worldDataLock)
         {
-            get => grassTexture;
-            set
+            foreach ((PlanetCellId cell, VoxelBlockType blockType) in placedBlocks)
             {
-                grassTexture = value;
-                InvalidateAtlasResources();
-            }
-        }
-
-        [Export]
-        public Texture2D? DirtTexture
-        {
-            get => dirtTexture;
-            set
-            {
-                dirtTexture = value;
-                InvalidateAtlasResources();
-            }
-        }
-
-        [Export]
-        public Texture2D? StoneTexture
-        {
-            get => stoneTexture;
-            set
-            {
-                stoneTexture = value;
-                InvalidateAtlasResources();
-            }
-        }
-
-        [Export(PropertyHint.Range, "0,8,1")]
-        public int AtlasPaddingPixels
-        {
-            get => atlasPaddingPixels;
-            set
-            {
-                atlasPaddingPixels = Math.Max(0, value);
-                InvalidateAtlasResources();
-            }
-        }
-
-        [Export(PropertyHint.Range, "1,256,1")]
-        public int FallbackTextureSize
-        {
-            get => fallbackTextureSize;
-            set
-            {
-                fallbackTextureSize = Math.Max(1, value);
-                InvalidateAtlasResources();
-            }
-        }
-
-        [Export]
-        public bool UseDebugColors
-        {
-            get => useDebugColors;
-            set
-            {
-                useDebugColors = value;
-                InvalidateAtlasResources();
-            }
-        }
-
-        [Export]
-        public bool CullFacesAgainstNeighborBlocks
-        {
-            get => cullFacesAgainstNeighborBlocks;
-            set => cullFacesAgainstNeighborBlocks = value;
-        }
-
-        [ExportGroup("Performance")]
-        [Export(PropertyHint.Range, "2,128,1")]
-        public int ChunkSizeInCells
-        {
-            get => chunkSizeInCells;
-            set => chunkSizeInCells = value;
-        }
-
-        public Vector3 PlanetCenter => GlobalPosition;
-
-        public float ApproximateSurfaceRadius => (baseRadiusInBlocks + heightVariationInBlocks + 0.5f) * blockSize;
-
-        public override void _Ready()
-        {
-            RefreshCachedData();
-
-            if (generateOnAwake && !generated)
-            {
-                GeneratePlanet();
-            }
-        }
-
-        public void GeneratePlanet()
-        {
-            RefreshCachedData();
-            InvalidateAtlasResources();
-            blocks.Clear();
-            removedTerrainCells.Clear();
-            ClearChunks();
-            int maxRadius = Mathf.CeilToInt(baseRadiusInBlocks + heightVariationInBlocks + 1f);
-
-            for (int faceIndex = 0; faceIndex < CubeFaces.Length; faceIndex++)
-            {
-                for (int u = -maxRadius; u <= maxRadius; u++)
+                if (blockType == VoxelBlockType.Air)
                 {
-                    for (int v = -maxRadius; v <= maxRadius; v++)
-                    {
-                        int minRadius = Math.Max(Math.Abs(u), Math.Abs(v));
-
-                        for (int radius = maxRadius; radius >= minRadius; radius--)
-                        {
-                            PlanetCellId cell = new(faceIndex, radius, u, v);
-
-                            if (!IsCanonicalCell(cell))
-                            {
-                                continue;
-                            }
-
-                            if (!TryGetNaturalTerrainBlock(cell, out VoxelBlockType blockType))
-                            {
-                                continue;
-                            }
-
-                            blocks[cell] = blockType;
-                            break;
-                        }
-                    }
+                    continue;
                 }
-            }
 
-            RebuildChunkIndex();
-            generated = true;
-            RebuildAllChunks();
-        }
-
-        public bool HasBlock(PlanetCellId cell)
-        {
-            return blocks.ContainsKey(cell) ||
-                   (!removedTerrainCells.Contains(cell) && TryGetNaturalTerrainBlock(cell, out _));
-        }
-
-        public bool TryGetBlock(PlanetCellId cell, out VoxelBlockType blockType)
-        {
-            return blocks.TryGetValue(cell, out blockType) ||
-                   (!removedTerrainCells.Contains(cell) && TryGetNaturalTerrainBlock(cell, out blockType));
-        }
-
-        public bool RemoveBlock(PlanetCellId cell)
-        {
-            if (!blocks.Remove(cell))
-            {
-                return false;
-            }
-
-            if (TryGetNaturalTerrainBlock(cell, out _))
-            {
-                removedTerrainCells.Add(cell);
-            }
-
-            RemoveCellFromChunkIndex(cell);
-            RevealExposedNeighbors(cell);
-            RebuildAffectedChunks(cell);
-            return true;
-        }
-
-        public bool PlaceBlock(PlanetCellId cell, VoxelBlockType blockType)
-        {
-            if (blockType == VoxelBlockType.Air || HasBlock(cell))
-            {
-                return false;
-            }
-
-            blocks[cell] = blockType;
-            AddCellToChunkIndex(cell);
-            RebuildAffectedChunks(cell);
-            return true;
-        }
-
-        public WorldSaveData CreateSaveData()
-        {
-            WorldSaveData data = new()
-            {
-                BaseRadiusInBlocks = baseRadiusInBlocks,
-                HeightVariationInBlocks = heightVariationInBlocks,
-                NoiseScale = noiseScale,
-                WorldSeed = worldSeed,
-                DistortionOptimizedRotationEuler = Vector3Save.FromVector3(distortionOptimizedRotationEuler),
-                BlockSize = blockSize,
-                UseDebugColors = useDebugColors,
-                CullFacesAgainstNeighborBlocks = cullFacesAgainstNeighborBlocks,
-                ChunkSizeInCells = chunkSizeInCells
-            };
-
-            foreach ((PlanetCellId cell, VoxelBlockType blockType) in blocks)
-            {
-                data.Blocks.Add(new BlockEntrySave
+                blockSaves.Add(new BlockEntrySave
                 {
                     Cell = CellSave.FromCell(cell),
                     BlockType = (int)blockType
                 });
             }
 
-            foreach (PlanetCellId cell in removedTerrainCells)
+            foreach (PlanetCellId cell in removedCells)
             {
-                data.RemovedCells.Add(CellSave.FromCell(cell));
-            }
-
-            return data;
-        }
-
-        public void LoadFromSave(WorldSaveData data)
-        {
-            baseRadiusInBlocks = data.BaseRadiusInBlocks;
-            heightVariationInBlocks = data.HeightVariationInBlocks;
-            noiseScale = data.NoiseScale;
-            worldSeed = data.WorldSeed;
-            distortionOptimizedRotationEuler = data.DistortionOptimizedRotationEuler.ToVector3();
-            blockSize = data.BlockSize;
-            useDebugColors = data.UseDebugColors;
-            cullFacesAgainstNeighborBlocks = data.CullFacesAgainstNeighborBlocks;
-            chunkSizeInCells = data.ChunkSizeInCells;
-
-            RefreshCachedData();
-            InvalidateAtlasResources();
-            blocks.Clear();
-            removedTerrainCells.Clear();
-            ClearChunks();
-
-            foreach (BlockEntrySave blockEntry in data.Blocks)
-            {
-                blocks[blockEntry.Cell.ToCell()] = (VoxelBlockType)blockEntry.BlockType;
-            }
-
-            foreach (CellSave removedCell in data.RemovedCells)
-            {
-                removedTerrainCells.Add(removedCell.ToCell());
-            }
-
-            RebuildChunkIndex();
-            generated = true;
-            RebuildAllChunks();
-        }
-
-        public Vector3 CellToWorld(PlanetCellId cell)
-        {
-            return ToGlobal(ProjectCubePoint(ToCubePoint(cell)) * blockSize);
-        }
-
-        public Aabb GetCellAabb(PlanetCellId cell)
-        {
-            Vector3 size = Vector3.One * blockSize * 1.05f;
-            return new Aabb(CellToWorld(cell) - size * 0.5f, size);
-        }
-
-        public bool TryGetBreakCell(
-            CollisionObject3D? collider,
-            int triangleIndex,
-            Vector3 collisionPoint,
-            Vector3 collisionNormal,
-            out PlanetCellId cell)
-        {
-            if (!TryResolveTriangleHit(collider, triangleIndex, out TriangleHitData hitData))
-            {
-                cell = default;
-                return false;
-            }
-
-            cell = hitData.Cell;
-            return blocks.ContainsKey(cell);
-        }
-
-        public bool TryGetPlaceCell(
-            CollisionObject3D? collider,
-            int triangleIndex,
-            Vector3 collisionPoint,
-            Vector3 collisionNormal,
-            out PlanetCellId cell)
-        {
-            if (!TryResolveTriangleHit(collider, triangleIndex, out TriangleHitData hitData))
-            {
-                cell = default;
-                return false;
-            }
-
-            if (!TryOffsetCell(hitData.Cell, LocalFaceDirections[hitData.FaceIndex], out cell))
-            {
-                return false;
-            }
-
-            return !HasBlock(cell);
-        }
-
-        private bool TryResolveTriangleHit(CollisionObject3D? collider, int triangleIndex, out TriangleHitData hitData)
-        {
-            hitData = default;
-
-            if (collider is null || !renderSectionByCollider.TryGetValue(collider, out ChunkRenderSection? section))
-            {
-                return false;
-            }
-
-            if (triangleIndex < 0 || triangleIndex >= section.TriangleHits.Count)
-            {
-                return false;
-            }
-
-            hitData = section.TriangleHits[triangleIndex];
-            return true;
-        }
-
-        private void InvalidateAtlasResources()
-        {
-            atlasMaterial = null;
-            atlasTexture = null;
-            atlasRegions.Clear();
-        }
-
-        private static Color GetBlockColor(VoxelBlockType blockType)
-        {
-            return blockType switch
-            {
-                VoxelBlockType.Grass => new Color(0.42f, 0.69f, 0.24f),
-                VoxelBlockType.Dirt => new Color(0.45f, 0.30f, 0.18f),
-                VoxelBlockType.Stone => new Color(0.57f, 0.60f, 0.64f),
-                _ => Colors.White
-            };
-        }
-
-        private Material GetOrCreateAtlasMaterial()
-        {
-            EnsureAtlasResources();
-            return atlasMaterial!;
-        }
-
-        private void EnsureAtlasResources()
-        {
-            if (atlasMaterial is not null &&
-                atlasTexture is not null &&
-                atlasRegions.Count == RenderBlockTypes.Length)
-            {
-                return;
-            }
-
-            AtlasBuildResult atlas = BuildTextureAtlas();
-            atlasTexture = atlas.Texture;
-            atlasMaterial = CreateAtlasMaterial(atlas.Texture);
-            atlasRegions.Clear();
-
-            foreach (KeyValuePair<VoxelBlockType, AtlasRegion> region in atlas.Regions)
-            {
-                atlasRegions[region.Key] = region.Value;
+                removedCellSaves.Add(CellSave.FromCell(cell));
             }
         }
 
-        private AtlasBuildResult BuildTextureAtlas()
+        return new WorldSaveData
         {
-            int padding = Math.Max(0, atlasPaddingPixels);
-            List<AtlasSource> sources = new(RenderBlockTypes.Length);
-            int totalArea = 0;
-            int maxWidth = 1;
+            BaseRadiusInBlocks = BaseRadiusInBlocks,
+            HeightVariationInBlocks = HeightVariationInBlocks,
+            NoiseScale = NoiseScale,
+            WorldSeed = WorldSeed,
+            FaceCoordinateUniformity = FaceCoordinateUniformity,
+            PolynomialWarpBias = PolynomialWarpBias,
+            DistortionOptimizedRotationEuler = Vector3Save.FromVector3(DistortionOptimizedRotationEuler),
+            LocalCellDeformation = LocalCellDeformation,
+            BlockSize = BlockSize,
+            UseDebugColors = UseDebugColors,
+            CullFacesAgainstNeighborBlocks = CullFacesAgainstNeighborBlocks,
+            ChunkSizeInCells = ChunkSizeInCells,
+            Blocks = blockSaves,
+            RemovedCells = removedCellSaves
+        };
+    }
 
-            foreach (VoxelBlockType blockType in RenderBlockTypes)
-            {
-                Image image = GetAtlasSourceImage(blockType);
-                sources.Add(new AtlasSource(blockType, image));
-                totalArea += (image.GetWidth() + padding * 2) * (image.GetHeight() + padding * 2);
-                maxWidth = Math.Max(maxWidth, image.GetWidth() + padding * 2);
-            }
-
-            sources.Sort(static (left, right) =>
-            {
-                int heightComparison = right.Image.GetHeight().CompareTo(left.Image.GetHeight());
-                return heightComparison != 0 ? heightComparison : right.Image.GetWidth().CompareTo(left.Image.GetWidth());
-            });
-
-            int atlasWidth = NextPowerOfTwo(Math.Max(maxWidth, Mathf.CeilToInt(Mathf.Sqrt(totalArea))));
-            Dictionary<VoxelBlockType, Rect2I> placements;
-            int usedHeight;
-
-            while (true)
-            {
-                (bool success, Dictionary<VoxelBlockType, Rect2I> packedPlacements, int packedHeight) =
-                    TryPackAtlas(sources, atlasWidth, padding);
-
-                if (success)
-                {
-                    placements = packedPlacements;
-                    usedHeight = packedHeight;
-                    break;
-                }
-
-                atlasWidth *= 2;
-            }
-
-            int atlasHeight = NextPowerOfTwo(Math.Max(1, usedHeight));
-            Image atlasImage = Image.CreateEmpty(atlasWidth, atlasHeight, false, Image.Format.Rgba8);
-            atlasImage.Fill(Colors.Transparent);
-            Dictionary<VoxelBlockType, AtlasRegion> regions = new(RenderBlockTypes.Length);
-
-            foreach (AtlasSource source in sources)
-            {
-                Rect2I placement = placements[source.BlockType];
-                atlasImage.BlitRect(
-                    source.Image,
-                    new Rect2I(Vector2I.Zero, new Vector2I(source.Image.GetWidth(), source.Image.GetHeight())),
-                    placement.Position);
-
-                regions[source.BlockType] = CreateAtlasRegion(placement, atlasWidth, atlasHeight);
-            }
-
-            return new AtlasBuildResult(ImageTexture.CreateFromImage(atlasImage), regions);
-        }
-
-        private Image GetAtlasSourceImage(VoxelBlockType blockType)
+    public bool HasBlock(PlanetCellId cell)
+    {
+        if (!IsValidCell(cell))
         {
-            Texture2D? sourceTexture = GetTextureForBlock(blockType);
-            Image? sourceImage = sourceTexture?.GetImage();
-
-            if (sourceImage is null || sourceImage.GetWidth() <= 0 || sourceImage.GetHeight() <= 0)
-            {
-                return CreateFallbackBlockImage(GetBlockColor(blockType));
-            }
-
-            return sourceImage;
-        }
-
-        private Texture2D? GetTextureForBlock(VoxelBlockType blockType)
-        {
-            return blockType switch
-            {
-                VoxelBlockType.Grass => grassTexture,
-                VoxelBlockType.Dirt => dirtTexture,
-                VoxelBlockType.Stone => stoneTexture,
-                _ => null
-            };
-        }
-
-        private Image CreateFallbackBlockImage(Color color)
-        {
-            int size = Math.Max(1, fallbackTextureSize);
-            Image image = Image.CreateEmpty(size, size, false, Image.Format.Rgba8);
-            image.Fill(color);
-            return image;
-        }
-
-        private static (bool Success, Dictionary<VoxelBlockType, Rect2I> Placements, int UsedHeight) TryPackAtlas(
-            List<AtlasSource> sources,
-            int atlasWidth,
-            int padding)
-        {
-            Dictionary<VoxelBlockType, Rect2I> placements = new(sources.Count);
-            int x = padding;
-            int y = padding;
-            int shelfHeight = 0;
-
-            foreach (AtlasSource source in sources)
-            {
-                int sourceWidth = source.Image.GetWidth();
-                int sourceHeight = source.Image.GetHeight();
-
-                if (x + sourceWidth + padding > atlasWidth)
-                {
-                    x = padding;
-                    y += shelfHeight;
-                    shelfHeight = 0;
-                }
-
-                if (sourceWidth + padding * 2 > atlasWidth)
-                {
-                    return (false, placements, 0);
-                }
-
-                placements[source.BlockType] = new Rect2I(x, y, sourceWidth, sourceHeight);
-                x += sourceWidth + padding * 2;
-                shelfHeight = Math.Max(shelfHeight, sourceHeight + padding * 2);
-            }
-
-            return (true, placements, y + shelfHeight);
-        }
-
-        private static AtlasRegion CreateAtlasRegion(Rect2I placement, int atlasWidth, int atlasHeight)
-        {
-            float halfPixelX = 0.5f / atlasWidth;
-            float halfPixelY = 0.5f / atlasHeight;
-            Vector2 min = new(
-                placement.Position.X / (float)atlasWidth + halfPixelX,
-                placement.Position.Y / (float)atlasHeight + halfPixelY);
-            Vector2 max = new(
-                (placement.Position.X + placement.Size.X) / (float)atlasWidth - halfPixelX,
-                (placement.Position.Y + placement.Size.Y) / (float)atlasHeight - halfPixelY);
-            return new AtlasRegion(min, max);
-        }
-
-        private Material CreateAtlasMaterial(Texture2D texture)
-        {
-            if (overrideMaterial is BaseMaterial3D)
-            {
-                Material clone = (Material)overrideMaterial.Duplicate();
-                clone.ResourceName = "Voxel Atlas Material";
-                if (clone is BaseMaterial3D baseClone)
-                {
-                    ConfigureAtlasMaterial(baseClone, texture);
-                }
-
-                return clone;
-            }
-
-            if (overrideMaterial is not null)
-            {
-                GD.PushWarning("OverrideMaterial must inherit BaseMaterial3D to receive the runtime texture atlas. Falling back to a StandardMaterial3D.");
-            }
-
-            StandardMaterial3D material = new()
-            {
-                ResourceName = "Voxel Atlas Material",
-                Roughness = 0.92f,
-                Metallic = 0f,
-                CullMode = BaseMaterial3D.CullModeEnum.Back
-            };
-
-            ConfigureAtlasMaterial(material, texture);
-            return material;
-        }
-
-        private void ConfigureAtlasMaterial(BaseMaterial3D material, Texture2D texture)
-        {
-            material.AlbedoColor = Colors.White;
-            material.AlbedoTexture = texture;
-            material.TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest;
-            material.TextureRepeat = false;
-            material.VertexColorUseAsAlbedo = useDebugColors;
-        }
-
-        private static int NextPowerOfTwo(int value)
-        {
-            int result = 1;
-            while (result < value)
-            {
-                result <<= 1;
-            }
-
-            return result;
-        }
-
-        private void ClearChunks()
-        {
-            foreach (ChunkSection chunk in chunks.Values)
-            {
-                DestroyChunkRuntime(chunk);
-            }
-
-            chunks.Clear();
-            cellsByChunk.Clear();
-            renderSectionByCollider.Clear();
-        }
-
-        private void DestroyChunkRuntime(ChunkSection chunk)
-        {
-            renderSectionByCollider.Remove(chunk.RenderSection.Body);
-            chunk.RenderSection.MeshInstance.Mesh = null;
-            chunk.RenderSection.CollisionShape.Shape = null;
-            chunk.RenderSection.RuntimeMesh = null;
-
-            if (IsInstanceValid(chunk.Root))
-            {
-                chunk.Root.QueueFree();
-            }
-        }
-
-        private void RebuildChunkIndex()
-        {
-            cellsByChunk.Clear();
-
-            foreach (PlanetCellId cell in blocks.Keys)
-            {
-                AddCellToChunkIndex(cell);
-            }
-        }
-
-        private void AddCellToChunkIndex(PlanetCellId cell)
-        {
-            ChunkId chunkId = GetChunkId(cell);
-
-            if (!cellsByChunk.TryGetValue(chunkId, out HashSet<PlanetCellId>? chunkCells))
-            {
-                chunkCells = new HashSet<PlanetCellId>();
-                cellsByChunk[chunkId] = chunkCells;
-            }
-
-            chunkCells.Add(cell);
-        }
-
-        private void RemoveCellFromChunkIndex(PlanetCellId cell)
-        {
-            ChunkId chunkId = GetChunkId(cell);
-
-            if (!cellsByChunk.TryGetValue(chunkId, out HashSet<PlanetCellId>? chunkCells))
-            {
-                return;
-            }
-
-            chunkCells.Remove(cell);
-
-            if (chunkCells.Count == 0)
-            {
-                cellsByChunk.Remove(chunkId);
-            }
-        }
-
-        private void RebuildAllChunks()
-        {
-            List<ChunkId> chunkIds = new(cellsByChunk.Keys);
-
-            foreach (ChunkId chunkId in chunkIds)
-            {
-                RebuildChunk(chunkId);
-            }
-        }
-
-        private void RebuildAffectedChunks(PlanetCellId cell)
-        {
-            HashSet<ChunkId> dirtyChunks = new()
-            {
-                GetChunkId(cell)
-            };
-
-            for (int faceIndex = 0; faceIndex < LocalFaceDirections.Length; faceIndex++)
-            {
-                dirtyChunks.Add(GetNeighborChunkId(cell, LocalFaceDirections[faceIndex]));
-            }
-
-            foreach (ChunkId chunkId in dirtyChunks)
-            {
-                RebuildChunk(chunkId);
-            }
-        }
-
-        private ChunkId GetNeighborChunkId(PlanetCellId cell, Vector3I localOffset)
-        {
-            CubeFace cubeFace = CubeFaces[cell.Face];
-            Vector3I cubeOffset =
-                cubeFace.AxisU * localOffset.X +
-                cubeFace.Normal * localOffset.Y +
-                cubeFace.AxisV * localOffset.Z;
-
-            return GetChunkId(ToCubeCoordinate(cell) + cubeOffset);
-        }
-
-        private ChunkId GetChunkId(PlanetCellId cell)
-        {
-            return GetChunkId(ToCubeCoordinate(cell));
-        }
-
-        private ChunkId GetChunkId(Vector3I cubeCoordinate)
-        {
-            int chunkSize = Math.Max(2, chunkSizeInCells);
-            return new ChunkId(
-                FloorDiv(cubeCoordinate.X, chunkSize),
-                FloorDiv(cubeCoordinate.Y, chunkSize),
-                FloorDiv(cubeCoordinate.Z, chunkSize));
-        }
-
-        private static int FloorDiv(int value, int divisor)
-        {
-            int quotient = value / divisor;
-            int remainder = value % divisor;
-            return remainder < 0 ? quotient - 1 : quotient;
-        }
-
-        private ChunkSection EnsureChunk(ChunkId chunkId)
-        {
-            if (chunks.TryGetValue(chunkId, out ChunkSection? chunk))
-            {
-                return chunk;
-            }
-
-            Node3D chunkObject = new()
-            {
-                Name = $"Chunk {chunkId.X} {chunkId.Y} {chunkId.Z}"
-            };
-            AddChild(chunkObject);
-
-            chunk = new ChunkSection
-            {
-                Root = chunkObject
-            };
-
-            Node3D sectionObject = new()
-            {
-                Name = "Voxel Section"
-            };
-            chunkObject.AddChild(sectionObject);
-
-            MeshInstance3D meshInstance = new()
-            {
-                MaterialOverride = GetOrCreateAtlasMaterial()
-            };
-            sectionObject.AddChild(meshInstance);
-
-            StaticBody3D body = new()
-            {
-                CollisionLayer = 1,
-                CollisionMask = 0
-            };
-            sectionObject.AddChild(body);
-
-            CollisionShape3D collisionShape = new();
-            body.AddChild(collisionShape);
-
-            ChunkRenderSection renderSection = new ChunkRenderSection
-            {
-                MeshInstance = meshInstance,
-                Body = body,
-                CollisionShape = collisionShape
-            };
-
-            chunk.RenderSection = renderSection;
-            renderSectionByCollider[body] = renderSection;
-
-            chunks[chunkId] = chunk;
-            return chunk;
-        }
-
-        private void RebuildChunk(ChunkId chunkId)
-        {
-            bool hasChunkCells = cellsByChunk.TryGetValue(chunkId, out HashSet<PlanetCellId>? chunkCells) &&
-                                 chunkCells.Count > 0;
-
-            if (!hasChunkCells)
-            {
-                if (chunks.TryGetValue(chunkId, out ChunkSection? emptyChunk))
-                {
-                    chunks.Remove(chunkId);
-                    DestroyChunkRuntime(emptyChunk);
-                }
-
-                return;
-            }
-
-            ChunkSection chunk = EnsureChunk(chunkId);
-            BuildChunkMesh(chunk.RenderSection, chunkCells!);
-        }
-
-        private bool TryGetNaturalTerrainBlock(PlanetCellId cell, out VoxelBlockType blockType)
-        {
-            float depth = SampleNaturalBlockDepth(cell);
-
-            if (depth >= 0f)
-            {
-                blockType = ResolveBlockType(depth);
-                return true;
-            }
-
-            if (depth < -SurfaceContinuationTolerance ||
-                !TryOffsetCell(cell, Vector3I.Down, out PlanetCellId inwardCell) ||
-                !TryGetNaturalTerrainBlock(inwardCell, out _))
-            {
-                blockType = VoxelBlockType.Air;
-                return false;
-            }
-
-            blockType = ResolveBlockType(0f);
-            return true;
-        }
-
-        private float SampleNaturalBlockDepth(PlanetCellId cell)
-        {
-            Vector3 cubePoint = ToCubePoint(cell);
-            Vector3 rotatedPoint = distortionOptimizedRotation * cubePoint;
-            float radialDistance = Math.Max(
-                Math.Abs(rotatedPoint.X),
-                Math.Max(Math.Abs(rotatedPoint.Y), Math.Abs(rotatedPoint.Z)));
-
-            if (radialDistance < 0.01f)
-            {
-                return float.MaxValue;
-            }
-
-            float surfaceRadius = baseRadiusInBlocks;
-
-            if (heightVariationInBlocks > 0f)
-            {
-                Vector3 direction = GetTerrainDirection(rotatedPoint, radialDistance);
-                surfaceRadius += SampleHeight(direction);
-            }
-
-            return surfaceRadius - radialDistance;
-        }
-
-        private Vector3 GetTerrainDirection(Vector3 rotatedPoint, float radialDistance)
-        {
-            Vector3 facePoint = rotatedPoint / radialDistance;
-            return inverseDistortionOptimizedRotation * ProjectAdjustedSphericalCube(facePoint).Normalized();
-        }
-
-        private float SampleHeight(Vector3 direction)
-        {
-            float seedOffset = worldSeed * 0.001f;
-            float xy = UnityPerlinNoise.Noise(direction.X * noiseScale + seedOffset, direction.Y * noiseScale + seedOffset * 2f);
-            float yz = UnityPerlinNoise.Noise(direction.Y * noiseScale + seedOffset * 3f, direction.Z * noiseScale + seedOffset * 4f);
-            float xz = UnityPerlinNoise.Noise(direction.X * noiseScale + seedOffset * 5f, direction.Z * noiseScale + seedOffset * 6f);
-            float combined = (xy + yz + xz) / 3f;
-            return (combined * 2f - 1f) * heightVariationInBlocks;
-        }
-
-        private static VoxelBlockType ResolveBlockType(float depth)
-        {
-            if (depth <= 1.25f)
-            {
-                return VoxelBlockType.Grass;
-            }
-
-            if (depth <= 3.5f)
-            {
-                return VoxelBlockType.Dirt;
-            }
-
-            return VoxelBlockType.Stone;
-        }
-
-        private void BuildChunkMesh(ChunkRenderSection section, HashSet<PlanetCellId> chunkCells)
-        {
-            EnsureAtlasResources();
-            List<Vector3> vertices = new();
-            List<Vector3> normals = new();
-            List<Color> colors = new();
-            List<Vector2> uvs = new();
-            List<int> triangles = new();
-            List<TriangleHitData> triangleHits = new();
-            List<Vector3> collisionFaces = new();
-
-            foreach (PlanetCellId cell in chunkCells)
-            {
-                if (!blocks.TryGetValue(cell, out VoxelBlockType blockType))
-                {
-                    continue;
-                }
-
-                AddBlockFaces(blockType, cell, vertices, normals, colors, uvs, triangles, triangleHits, collisionFaces);
-            }
-
-            ArrayMesh? mesh = section.RuntimeMesh;
-
-            if (mesh is null)
-            {
-                mesh = new ArrayMesh
-                {
-                    ResourceName = "Chunk Mesh"
-                };
-                section.RuntimeMesh = mesh;
-            }
-            else
-            {
-                mesh.ClearSurfaces();
-                mesh.ResourceName = "Chunk Mesh";
-            }
-
-            if (vertices.Count == 0)
-            {
-                section.MeshInstance.Mesh = null;
-                section.CollisionShape.Shape = null;
-                section.MeshInstance.Visible = false;
-                section.TriangleHits = triangleHits;
-                return;
-            }
-
-            Godot.Collections.Array arrays = [];
-            arrays.Resize((int)Mesh.ArrayType.Max);
-            arrays[(int)Mesh.ArrayType.Vertex] = vertices.ToArray();
-            arrays[(int)Mesh.ArrayType.Normal] = normals.ToArray();
-            arrays[(int)Mesh.ArrayType.Color] = colors.ToArray();
-            arrays[(int)Mesh.ArrayType.TexUV] = uvs.ToArray();
-            arrays[(int)Mesh.ArrayType.Index] = triangles.ToArray();
-            mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-
-            section.MeshInstance.Mesh = mesh;
-            section.CollisionShape.Shape = new ConcavePolygonShape3D
-            {
-                Data = collisionFaces.ToArray()
-            };
-            section.MeshInstance.Visible = true;
-            section.TriangleHits = triangleHits;
-        }
-
-        private void AddBlockFaces(
-            VoxelBlockType blockType,
-            PlanetCellId cell,
-            List<Vector3> vertices,
-            List<Vector3> normals,
-            List<Color> colors,
-            List<Vector2> uvs,
-            List<int> triangles,
-            List<TriangleHitData> triangleHits,
-            List<Vector3> collisionFaces)
-        {
-            AtlasRegion atlasRegion = atlasRegions[blockType];
-            CubeFace cubeFace = CubeFaces[cell.Face];
-            Vector3 cubeCenter = ToCubePoint(cell);
-            bool shouldCullNeighborFaces = ShouldCullNeighborFaces();
-
-            for (int faceIndex = 0; faceIndex < LocalFaceDirections.Length; faceIndex++)
-            {
-                if (shouldCullNeighborFaces &&
-                    TryOffsetCell(cell, LocalFaceDirections[faceIndex], out PlanetCellId neighbor) &&
-                    HasBlock(neighbor))
-                {
-                    continue;
-                }
-
-                int baseVertexIndex = vertices.Count;
-                Vector3[] renderedFaceVertices = new Vector3[4];
-
-                for (int i = 0; i < 4; i++)
-                {
-                    Vector3 localVertex = FaceVertices[faceIndex][i];
-                    Vector3 cubeVertex =
-                        cubeCenter +
-                        (Vector3)cubeFace.AxisU * localVertex.X +
-                        (Vector3)cubeFace.Normal * localVertex.Y +
-                        (Vector3)cubeFace.AxisV * localVertex.Z;
-
-                    Vector3 localProjected = GetRenderedCornerPoint(cubeVertex) * blockSize;
-                    renderedFaceVertices[i] = localProjected;
-                    vertices.Add(localProjected);
-                    colors.Add(GetDebugColor(cell, localProjected / blockSize));
-                    uvs.Add(atlasRegion.Map(FaceUvs[i]));
-                }
-
-                Vector3 faceCenter =
-                    (renderedFaceVertices[0] +
-                     renderedFaceVertices[1] +
-                     renderedFaceVertices[2] +
-                     renderedFaceVertices[3]) * 0.25f;
-                Vector3 faceNormal = faceCenter.Normalized();
-
-                if (faceNormal.LengthSquared() < 0.0001f)
-                {
-                    Vector3 normalA = (renderedFaceVertices[1] - renderedFaceVertices[0])
-                        .Cross(renderedFaceVertices[2] - renderedFaceVertices[0])
-                        .Normalized();
-                    Vector3 normalB = (renderedFaceVertices[2] - renderedFaceVertices[0])
-                        .Cross(renderedFaceVertices[3] - renderedFaceVertices[0])
-                        .Normalized();
-                    faceNormal = (normalA + normalB).Normalized();
-                }
-
-                normals.Add(faceNormal);
-                normals.Add(faceNormal);
-                normals.Add(faceNormal);
-                normals.Add(faceNormal);
-
-                triangles.Add(baseVertexIndex);
-                triangles.Add(baseVertexIndex + 2);
-                triangles.Add(baseVertexIndex + 1);
-                triangles.Add(baseVertexIndex);
-                triangles.Add(baseVertexIndex + 3);
-                triangles.Add(baseVertexIndex + 2);
-
-                collisionFaces.Add(renderedFaceVertices[0]);
-                collisionFaces.Add(renderedFaceVertices[2]);
-                collisionFaces.Add(renderedFaceVertices[1]);
-                collisionFaces.Add(renderedFaceVertices[0]);
-                collisionFaces.Add(renderedFaceVertices[3]);
-                collisionFaces.Add(renderedFaceVertices[2]);
-
-                TriangleHitData hitData = new TriangleHitData(cell, faceIndex);
-                triangleHits.Add(hitData);
-                triangleHits.Add(hitData);
-            }
-        }
-
-        private bool ShouldCullNeighborFaces()
-        {
-            return cullFacesAgainstNeighborBlocks;
-        }
-
-        private bool TryOffsetCell(PlanetCellId cell, Vector3I localOffset, out PlanetCellId neighbor)
-        {
-            CubeFace cubeFace = CubeFaces[cell.Face];
-            Vector3I cubeOffset =
-                cubeFace.AxisU * localOffset.X +
-                cubeFace.Normal * localOffset.Y +
-                cubeFace.AxisV * localOffset.Z;
-
-            return TryEncodeCubeCoordinate(ToCubeCoordinate(cell) + cubeOffset, out neighbor);
-        }
-
-        private void RevealExposedNeighbors(PlanetCellId cell)
-        {
-            for (int directionIndex = 0; directionIndex < LocalFaceDirections.Length; directionIndex++)
-            {
-                if (!TryOffsetCell(cell, LocalFaceDirections[directionIndex], out PlanetCellId neighbor) ||
-                    blocks.ContainsKey(neighbor) ||
-                    removedTerrainCells.Contains(neighbor) ||
-                    !TryGetNaturalTerrainBlock(neighbor, out VoxelBlockType blockType) ||
-                    !IsExposedBlock(neighbor))
-                {
-                    continue;
-                }
-
-                blocks[neighbor] = blockType;
-                AddCellToChunkIndex(neighbor);
-            }
-        }
-
-        private bool IsExposedBlock(PlanetCellId cell)
-        {
-            for (int directionIndex = 0; directionIndex < LocalFaceDirections.Length; directionIndex++)
-            {
-                if (!TryOffsetCell(cell, LocalFaceDirections[directionIndex], out PlanetCellId neighbor) ||
-                    !HasBlock(neighbor))
-                {
-                    return true;
-                }
-            }
-
             return false;
         }
 
-        private Vector3 GetRenderedCornerPoint(Vector3 exactCubeVertex)
+        lock (worldDataLock)
         {
-            return ProjectCubePoint(exactCubeVertex);
-        }
-
-        private static int GetFaceIndexForPoint(Vector3 cubePoint)
-        {
-            float absX = Mathf.Abs(cubePoint.X);
-            float absY = Mathf.Abs(cubePoint.Y);
-            float absZ = Mathf.Abs(cubePoint.Z);
-
-            if (absX >= absY && absX >= absZ)
+            if (placedBlocks.TryGetValue(cell, out VoxelBlockType placedType))
             {
-                return cubePoint.X >= 0f ? 0 : 1;
+                return placedType != VoxelBlockType.Air;
             }
 
-            if (absY >= absZ)
+            if (removedCells.Contains(cell))
             {
-                return cubePoint.Y >= 0f ? 2 : 3;
-            }
-
-            return cubePoint.Z >= 0f ? 4 : 5;
-        }
-
-        private bool IsCanonicalCell(PlanetCellId cell)
-        {
-            return TryEncodeCubeCoordinate(ToCubeCoordinate(cell), out PlanetCellId encoded) && encoded == cell;
-        }
-
-        private Vector3I ToCubeCoordinate(PlanetCellId cell)
-        {
-            CubeFace cubeFace = CubeFaces[cell.Face];
-            return cubeFace.Normal * cell.Radius +
-                   cubeFace.AxisU * cell.U +
-                   cubeFace.AxisV * cell.V;
-        }
-
-        private Vector3 ToCubePoint(PlanetCellId cell)
-        {
-            Vector3I cube = ToCubeCoordinate(cell);
-            return new Vector3(cube.X, cube.Y, cube.Z);
-        }
-
-        private bool TryEncodeCubeCoordinate(Vector3I cubeCoordinate, out PlanetCellId cell)
-        {
-            int radius = Math.Max(Math.Abs(cubeCoordinate.X), Math.Max(Math.Abs(cubeCoordinate.Y), Math.Abs(cubeCoordinate.Z)));
-
-            if (radius < 0)
-            {
-                cell = default;
                 return false;
             }
-
-            int faceIndex = GetFaceIndexForCube(cubeCoordinate);
-            CubeFace cubeFace = CubeFaces[faceIndex];
-
-            cell = new PlanetCellId(
-                faceIndex,
-                radius,
-                Dot(cubeCoordinate, cubeFace.AxisU),
-                Dot(cubeCoordinate, cubeFace.AxisV));
-
-            return true;
         }
 
-        private static int GetFaceIndexForCube(Vector3I cubeCoordinate)
-        {
-            int absX = Math.Abs(cubeCoordinate.X);
-            int absY = Math.Abs(cubeCoordinate.Y);
-            int absZ = Math.Abs(cubeCoordinate.Z);
+        return IsDefaultSolid(cell);
+    }
 
-            if (absX >= absY && absX >= absZ)
+    public void PlaceBlock(PlanetCellId cell, VoxelBlockType blockType)
+    {
+        if (!IsValidCell(cell))
+        {
+            return;
+        }
+
+        lock (worldDataLock)
+        {
+            if (blockType == VoxelBlockType.Air)
             {
-                return cubeCoordinate.X >= 0 ? 0 : 1;
+                RemoveBlockInternal(cell);
             }
-
-            if (absY >= absZ)
+            else
             {
-                return cubeCoordinate.Y >= 0 ? 2 : 3;
-            }
+                removedCells.Remove(cell);
 
-            return cubeCoordinate.Z >= 0 ? 4 : 5;
-        }
-
-        private Vector3 ProjectCubePoint(Vector3 cubePoint)
-        {
-            Basis rotation = GetDistortionOptimizedRotation();
-            Vector3 rotatedPoint = rotation * cubePoint;
-            float radius = Math.Max(Math.Abs(rotatedPoint.X), Math.Max(Math.Abs(rotatedPoint.Y), Math.Abs(rotatedPoint.Z)));
-
-            if (radius < 0.0001f)
-            {
-                return Vector3.Zero;
-            }
-
-            Vector3 facePoint = rotatedPoint / radius;
-            Vector3 direction = ProjectAdjustedSphericalCube(facePoint).Normalized();
-            return inverseDistortionOptimizedRotation * (direction * radius);
-        }
-
-        private static Vector3 ProjectAdjustedSphericalCube(Vector3 facePoint)
-        {
-            return CubeToSphere(facePoint);
-        }
-
-        private Basis GetDistortionOptimizedRotation()
-        {
-            return distortionOptimizedRotation;
-        }
-
-        private void RefreshCachedData()
-        {
-            Vector3 eulerRadians = distortionOptimizedRotationEuler * (Mathf.Pi / 180f);
-            distortionOptimizedRotation = Basis.FromEuler(eulerRadians, EulerOrder.Zxy);
-            inverseDistortionOptimizedRotation = distortionOptimizedRotation.Inverse();
-
-            for (int faceIndex = 0; faceIndex < faceDebugColors.Length; faceIndex++)
-            {
-                faceDebugColors[faceIndex] = Color.FromHsv(faceIndex / (float)CubeFaces.Length, 0.35f, 1f);
-            }
-        }
-
-        private static Vector3 CubeToSphere(Vector3 point)
-        {
-            float x2 = point.X * point.X;
-            float y2 = point.Y * point.Y;
-            float z2 = point.Z * point.Z;
-
-            return new Vector3(
-                point.X * Mathf.Sqrt(1f - 0.5f * (y2 + z2) + (y2 * z2) / 3f),
-                point.Y * Mathf.Sqrt(1f - 0.5f * (z2 + x2) + (z2 * x2) / 3f),
-                point.Z * Mathf.Sqrt(1f - 0.5f * (x2 + y2) + (x2 * y2) / 3f));
-        }
-
-        private static int Dot(Vector3I a, Vector3I b)
-        {
-            return a.X * b.X + a.Y * b.Y + a.Z * b.Z;
-        }
-
-        private Color GetDebugColor(PlanetCellId cell, Vector3 projectedPoint)
-        {
-            if (!useDebugColors)
-            {
-                return Colors.White;
-            }
-
-            Vector3 direction = projectedPoint.LengthSquared() < 0.0001f ? Vector3.Up : projectedPoint.Normalized();
-            Color faceColor = faceDebugColors[cell.Face];
-            Color axisColor = new(Mathf.Abs(direction.X), Mathf.Abs(direction.Y), Mathf.Abs(direction.Z), 1f);
-            return faceColor.Lerp(axisColor, 0.55f);
-        }
-
-        private static void EnableVertexColors(Material material)
-        {
-            if (material is BaseMaterial3D baseMaterial)
-            {
-                baseMaterial.VertexColorUseAsAlbedo = true;
-            }
-        }
-
-        private readonly struct CubeFace
-        {
-            public CubeFace(Vector3I normal, Vector3I axisU, Vector3I axisV)
-            {
-                Normal = normal;
-                AxisU = axisU;
-                AxisV = axisV;
-            }
-
-            public Vector3I Normal { get; }
-
-            public Vector3I AxisU { get; }
-
-            public Vector3I AxisV { get; }
-        }
-
-        private readonly struct TriangleHitData
-        {
-            public TriangleHitData(PlanetCellId cell, int faceIndex)
-            {
-                Cell = cell;
-                FaceIndex = faceIndex;
-            }
-
-            public PlanetCellId Cell { get; }
-
-            public int FaceIndex { get; }
-        }
-
-        private readonly struct ChunkId : IEquatable<ChunkId>
-        {
-            public ChunkId(int x, int y, int z)
-            {
-                X = x;
-                Y = y;
-                Z = z;
-            }
-
-            public int X { get; }
-
-            public int Y { get; }
-
-            public int Z { get; }
-
-            public bool Equals(ChunkId other)
-            {
-                return X == other.X && Y == other.Y && Z == other.Z;
-            }
-
-            public override bool Equals(object? obj)
-            {
-                return obj is ChunkId other && Equals(other);
-            }
-
-            public override int GetHashCode()
-            {
-                return HashCode.Combine(X, Y, Z);
-            }
-        }
-
-        private sealed class ChunkSection
-        {
-            public Node3D Root = null!;
-            public ChunkRenderSection RenderSection = null!;
-        }
-
-        private sealed class ChunkRenderSection
-        {
-            public MeshInstance3D MeshInstance = null!;
-            public StaticBody3D Body = null!;
-            public CollisionShape3D CollisionShape = null!;
-            public ArrayMesh? RuntimeMesh;
-            public List<TriangleHitData> TriangleHits = new();
-        }
-
-        private readonly struct AtlasSource
-        {
-            public AtlasSource(VoxelBlockType blockType, Image image)
-            {
-                BlockType = blockType;
-                Image = image;
-            }
-
-            public VoxelBlockType BlockType { get; }
-
-            public Image Image { get; }
-        }
-
-        private readonly struct AtlasRegion
-        {
-            public AtlasRegion(Vector2 min, Vector2 max)
-            {
-                Min = min;
-                Max = max;
-            }
-
-            public Vector2 Min { get; }
-
-            public Vector2 Max { get; }
-
-            public Vector2 Map(Vector2 uv)
-            {
-                return new Vector2(
-                    Mathf.Lerp(Min.X, Max.X, uv.X),
-                    Mathf.Lerp(Min.Y, Max.Y, uv.Y));
-            }
-        }
-
-        private readonly struct AtlasBuildResult
-        {
-            public AtlasBuildResult(Texture2D texture, Dictionary<VoxelBlockType, AtlasRegion> regions)
-            {
-                Texture = texture;
-                Regions = regions;
-            }
-
-            public Texture2D Texture { get; }
-
-            public Dictionary<VoxelBlockType, AtlasRegion> Regions { get; }
-        }
-
-        private static class UnityPerlinNoise
-        {
-            private static readonly int[] Permutation =
-            {
-                151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225,
-                140, 36, 103, 30, 69, 142, 8, 99, 37, 240, 21, 10, 23, 190, 6, 148,
-                247, 120, 234, 75, 0, 26, 197, 62, 94, 252, 219, 203, 117, 35, 11, 32,
-                57, 177, 33, 88, 237, 149, 56, 87, 174, 20, 125, 136, 171, 168, 68, 175,
-                74, 165, 71, 134, 139, 48, 27, 166, 77, 146, 158, 231, 83, 111, 229, 122,
-                60, 211, 133, 230, 220, 105, 92, 41, 55, 46, 245, 40, 244, 102, 143, 54,
-                65, 25, 63, 161, 1, 216, 80, 73, 209, 76, 132, 187, 208, 89, 18, 169,
-                200, 196, 135, 130, 116, 188, 159, 86, 164, 100, 109, 198, 173, 186, 3, 64,
-                52, 217, 226, 250, 124, 123, 5, 202, 38, 147, 118, 126, 255, 82, 85, 212,
-                207, 206, 59, 227, 47, 16, 58, 17, 182, 189, 28, 42, 223, 183, 170, 213,
-                119, 248, 152, 2, 44, 154, 163, 70, 221, 153, 101, 155, 167, 43, 172, 9,
-                129, 22, 39, 253, 19, 98, 108, 110, 79, 113, 224, 232, 178, 185, 112, 104,
-                218, 246, 97, 228, 251, 34, 242, 193, 238, 210, 144, 12, 191, 179, 162, 241,
-                81, 51, 145, 235, 249, 14, 239, 107, 49, 192, 214, 31, 181, 199, 106, 157,
-                184, 84, 204, 176, 115, 121, 50, 45, 127, 4, 150, 254, 138, 236, 205, 93,
-                222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66, 215, 61, 156, 180
-            };
-
-            private static readonly int[] P = BuildPermutationTable();
-
-            public static float Noise(float x, float y)
-            {
-                int xi = Mathf.FloorToInt(x) & 255;
-                int yi = Mathf.FloorToInt(y) & 255;
-
-                float xf = x - Mathf.Floor(x);
-                float yf = y - Mathf.Floor(y);
-
-                float u = Fade(xf);
-                float v = Fade(yf);
-
-                int aa = P[P[xi] + yi];
-                int ab = P[P[xi] + yi + 1];
-                int ba = P[P[xi + 1] + yi];
-                int bb = P[P[xi + 1] + yi + 1];
-
-                float x1 = Mathf.Lerp(Grad(aa, xf, yf), Grad(ba, xf - 1f, yf), u);
-                float x2 = Mathf.Lerp(Grad(ab, xf, yf - 1f), Grad(bb, xf - 1f, yf - 1f), u);
-                float value = Mathf.Lerp(x1, x2, v);
-                return (value + 1f) * 0.5f;
-            }
-
-            private static int[] BuildPermutationTable()
-            {
-                int[] table = new int[512];
-                for (int i = 0; i < 512; i++)
+                if (IsDefaultSolid(cell) && GetDefaultBlockType(cell) == blockType)
                 {
-                    table[i] = Permutation[i & 255];
+                    placedBlocks.Remove(cell);
+                }
+                else
+                {
+                    placedBlocks[cell] = blockType;
+                }
+            }
+        }
+
+        InvalidateChunksAround(cell);
+    }
+
+    public void RemoveBlock(PlanetCellId cell)
+    {
+        if (!IsValidCell(cell))
+        {
+            return;
+        }
+
+        lock (worldDataLock)
+        {
+            RemoveBlockInternal(cell);
+        }
+
+        InvalidateChunksAround(cell);
+    }
+
+    public Aabb GetCellAabb(PlanetCellId cell)
+    {
+        Vector3[] corners = GetCellCorners(cell);
+        Vector3 min = corners[0];
+        Vector3 max = corners[0];
+
+        for (int index = 1; index < corners.Length; index++)
+        {
+            min = min.Min(corners[index]);
+            max = max.Max(corners[index]);
+        }
+
+        return new Aabb(min, max - min);
+    }
+
+    public bool TryGetBreakCell(CollisionObject3D? collider, int faceIndex, Vector3 position, Vector3 normal, out PlanetCellId targetCell)
+    {
+        targetCell = default;
+
+        if (collider is not StaticBody3D staticBody ||
+            !chunkBodiesById.TryGetValue(staticBody.GetInstanceId(), out PlanetChunk? chunk) ||
+            faceIndex < 0 ||
+            faceIndex >= chunk.RaycastTriangles.Count)
+        {
+            return false;
+        }
+
+        targetCell = chunk.RaycastTriangles[faceIndex].Cell;
+        return HasBlock(targetCell);
+    }
+
+    public bool TryGetPlaceCell(CollisionObject3D? collider, int faceIndex, Vector3 position, Vector3 normal, out PlanetCellId targetCell)
+    {
+        targetCell = default;
+
+        if (collider is not StaticBody3D staticBody ||
+            !chunkBodiesById.TryGetValue(staticBody.GetInstanceId(), out PlanetChunk? chunk) ||
+            faceIndex < 0 ||
+            faceIndex >= chunk.RaycastTriangles.Count)
+        {
+            return false;
+        }
+
+        RaycastTriangleInfo hitInfo = chunk.RaycastTriangles[faceIndex];
+        return TryGetAdjacentCell(hitInfo.Cell, hitInfo.Face, out targetCell);
+    }
+
+    public Vector3 GetSurfaceSpawnPosition(Vector3 desiredDirection, float extraHeight)
+    {
+        Vector3 direction = desiredDirection.LengthSquared() > 0.0001f ? desiredDirection.Normalized() : Vector3.Up;
+        WrappedColumn column = ProjectDirectionToColumn(direction, faceResolution);
+        Vector3 surfaceDirection = GetDirectionForCellCenterStatic(column.Face, column.U, column.V, faceResolution, FaceCoordinateUniformity, PolynomialWarpBias);
+        int surfaceHeight = GetDefaultColumnHeight(column.Face, column.U, column.V);
+        return PlanetCenter + surfaceDirection * (surfaceHeight * BlockSize + extraHeight);
+    }
+
+    public void PrepareAreaAroundPosition(Vector3 worldPosition)
+    {
+        EnsureRuntimeNodes();
+        ConfigureNoise();
+        ConfigureMaterial();
+        ChunkAnchor anchor = GetAnchorFromWorldPosition(worldPosition);
+        currentAnchor = anchor;
+        SyncActiveChunks(anchor, buildImmediately: true);
+    }
+
+    private void RebuildPlanet()
+    {
+        EnsureRuntimeNodes();
+        ConfigureNoise();
+        ConfigureMaterial();
+
+        lock (worldDataLock)
+        {
+            defaultColumnHeights.Clear();
+        }
+
+        faceResolution = Mathf.Max(2, BaseRadiusInBlocks * 2);
+        currentAnchor = null;
+        ClearAllChunks();
+        BuildFarShell();
+        UpdateStreaming(force: true);
+    }
+
+    private void EnsureRuntimeNodes()
+    {
+        chunkRoot ??= GetNodeOrNull<Node3D>("PlanetChunks");
+        if (chunkRoot == null)
+        {
+            chunkRoot = new Node3D { Name = "PlanetChunks" };
+            AddChild(chunkRoot);
+        }
+
+        farShellMesh ??= GetNodeOrNull<MeshInstance3D>("FarShell");
+        if (farShellMesh == null)
+        {
+            farShellMesh = new MeshInstance3D { Name = "FarShell" };
+            AddChild(farShellMesh);
+        }
+    }
+
+    private void ConfigureNoise()
+    {
+        noise ??= new FastNoiseLite();
+        noise.Seed = WorldSeed;
+        noise.NoiseType = FastNoiseLite.NoiseTypeEnum.SimplexSmooth;
+        noise.FractalType = FastNoiseLite.FractalTypeEnum.Fbm;
+        noise.FractalOctaves = 4;
+        noise.FractalLacunarity = 2f;
+        noise.FractalGain = 0.5f;
+        noise.Frequency = Mathf.Max(0.01f, NoiseScale / Mathf.Max(1f, BaseRadiusInBlocks));
+    }
+
+    private void ConfigureMaterial()
+    {
+        atlasTexture ??= BuildTextureAtlas();
+
+        planetMaterial ??= new StandardMaterial3D
+        {
+            AlbedoTexture = atlasTexture,
+            VertexColorUseAsAlbedo = true,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            Roughness = 1f,
+            Metallic = 0f,
+            TextureFilter = BaseMaterial3D.TextureFilterEnum.NearestWithMipmaps
+        };
+
+        planetMaterial.AlbedoTexture = atlasTexture;
+    }
+
+    private Texture2D BuildTextureAtlas()
+    {
+        atlasUvRects.Clear();
+
+        int atlasSize = AtlasTileSize * AtlasGridSize;
+        Image image = Image.CreateEmpty(atlasSize, atlasSize, false, Image.Format.Rgba8);
+        image.Fill(new Color(0f, 0f, 0f, 0f));
+
+        PaintAtlasTile(image, VoxelBlockType.Grass, 0, new Color(0.30f, 0.58f, 0.27f), new Color(0.43f, 0.76f, 0.31f));
+        PaintAtlasTile(image, VoxelBlockType.Dirt, 1, new Color(0.42f, 0.27f, 0.18f), new Color(0.54f, 0.35f, 0.22f));
+        PaintAtlasTile(image, VoxelBlockType.Stone, 2, new Color(0.42f, 0.45f, 0.48f), new Color(0.62f, 0.64f, 0.68f));
+        atlasUvRects[VoxelBlockType.Air] = atlasUvRects[VoxelBlockType.Stone];
+
+        return ImageTexture.CreateFromImage(image);
+    }
+
+    private void PaintAtlasTile(Image image, VoxelBlockType blockType, int tileIndex, Color baseColor, Color accentColor)
+    {
+        int tileX = tileIndex % AtlasGridSize;
+        int tileY = tileIndex / AtlasGridSize;
+        int pixelStartX = tileX * AtlasTileSize;
+        int pixelStartY = tileY * AtlasTileSize;
+
+        for (int localY = 0; localY < AtlasTileSize; localY++)
+        {
+            for (int localX = 0; localX < AtlasTileSize; localX++)
+            {
+                float stripe = Mathf.Abs(Mathf.Sin((localX + 1) * 0.41f + (localY + 1) * 0.23f + tileIndex * 1.71f));
+                float grain = Mathf.Abs(Mathf.Sin((localX + 3) * 1.13f + tileIndex * 0.7f) * Mathf.Cos((localY + 5) * 1.37f));
+                float mask = Mathf.Clamp(stripe * 0.65f + grain * 0.35f, 0f, 1f);
+                Color color = baseColor.Lerp(accentColor, mask);
+
+                int edgeDistance = Mathf.Min(Mathf.Min(localX, localY), Mathf.Min(AtlasTileSize - 1 - localX, AtlasTileSize - 1 - localY));
+                if (edgeDistance < AtlasPaddingPixels)
+                {
+                    color = color.Lerp(baseColor, 0.45f);
                 }
 
-                return table;
-            }
-
-            private static float Fade(float t)
-            {
-                return t * t * t * (t * (t * 6f - 15f) + 10f);
-            }
-
-            private static float Grad(int hash, float x, float y)
-            {
-                return (hash & 3) switch
-                {
-                    0 => x + y,
-                    1 => -x + y,
-                    2 => x - y,
-                    _ => -x - y
-                };
+                image.SetPixel(pixelStartX + localX, pixelStartY + localY, color);
             }
         }
+
+        float atlasSize = AtlasTileSize * AtlasGridSize;
+        float tileSpan = AtlasTileSize / atlasSize;
+        float uvPadding = AtlasPaddingPixels / atlasSize;
+        atlasUvRects[blockType] = new Rect2(
+            new Vector2(tileX * tileSpan + uvPadding, tileY * tileSpan + uvPadding),
+            new Vector2(tileSpan - uvPadding * 2f, tileSpan - uvPadding * 2f));
+    }
+
+    private void UpdateStreaming(bool force = false)
+    {
+        trackedPlayer ??= ResolvePlayer();
+        if (trackedPlayer == null)
+        {
+            return;
+        }
+
+        ChunkAnchor nextAnchor = GetAnchorFromWorldPosition(trackedPlayer.GlobalPosition);
+        if (!force && currentAnchor.HasValue && currentAnchor.Value.Equals(nextAnchor))
+        {
+            return;
+        }
+
+        currentAnchor = nextAnchor;
+        SyncActiveChunks(nextAnchor);
+    }
+
+    private void InvalidateChunksAround(PlanetCellId editedCell)
+    {
+        WorldSnapshot snapshot = CreateWorldSnapshot();
+        HashSet<ChunkKey> targets = [GetChunkKey(editedCell)];
+
+        foreach (CellFace face in Enum.GetValues<CellFace>())
+        {
+            if (TryGetAdjacentCell(editedCell, face, out PlanetCellId adjacentCell))
+            {
+                targets.Add(GetChunkKey(adjacentCell));
+            }
+        }
+
+        foreach (ChunkKey key in targets)
+        {
+            bool wantsCollision = activeCollisionChunks.Contains(key);
+            RequestChunkBuild(key, wantsCollision, snapshot);
+        }
+    }
+
+    private void SyncActiveChunks(ChunkAnchor anchor, bool buildImmediately = false)
+    {
+        HashSet<ChunkKey> nextRenderChunks = [];
+        HashSet<ChunkKey> nextCollisionChunks = [];
+        int chunkSize = Mathf.Max(8, ChunkSizeInCells);
+
+        for (int du = -ActiveRenderChunkRadius; du <= ActiveRenderChunkRadius; du++)
+        {
+            for (int dv = -ActiveRenderChunkRadius; dv <= ActiveRenderChunkRadius; dv++)
+            {
+                WrappedColumn wrappedColumn = WrapColumn(anchor.Face, anchor.U + du * chunkSize, anchor.V + dv * chunkSize);
+                int surfaceHeight = GetDefaultColumnHeight(wrappedColumn.Face, wrappedColumn.U, wrappedColumn.V);
+                int minRadius = Mathf.Max(0, surfaceHeight - SurfaceShellDepthInBlocks);
+                int maxRadiusExclusive = surfaceHeight + ExtraOutwardBlocks;
+
+                for (int radius = minRadius; radius < maxRadiusExclusive; radius += chunkSize)
+                {
+                    ChunkKey key = new(wrappedColumn.Face, radius / chunkSize, wrappedColumn.U / chunkSize, wrappedColumn.V / chunkSize);
+                    nextRenderChunks.Add(key);
+
+                    if (Mathf.Abs(du) <= ActiveCollisionChunkRadius && Mathf.Abs(dv) <= ActiveCollisionChunkRadius)
+                    {
+                        nextCollisionChunks.Add(key);
+                    }
+                }
+            }
+        }
+
+        WorldSnapshot snapshot = CreateWorldSnapshot();
+
+        foreach (ChunkKey staleKey in activeRenderChunks)
+        {
+            if (!nextRenderChunks.Contains(staleKey))
+            {
+                DestroyChunk(staleKey);
+            }
+        }
+
+        activeRenderChunks.Clear();
+        activeCollisionChunks.Clear();
+
+        foreach (ChunkKey key in nextRenderChunks)
+        {
+            activeRenderChunks.Add(key);
+            bool wantsCollision = nextCollisionChunks.Contains(key);
+            if (wantsCollision)
+            {
+                activeCollisionChunks.Add(key);
+            }
+
+            if (buildImmediately)
+            {
+                BuildChunkImmediate(key, wantsCollision, snapshot);
+            }
+            else
+            {
+                RequestChunkBuild(key, wantsCollision, snapshot);
+            }
+        }
+    }
+
+    private void ClearAllChunks()
+    {
+        foreach (PlanetChunk chunk in chunks.Values)
+        {
+            chunk.Root.QueueFree();
+        }
+
+        chunks.Clear();
+        chunkBodiesById.Clear();
+        latestRequestedRevisions.Clear();
+        activeRenderChunks.Clear();
+        activeCollisionChunks.Clear();
+
+        while (completedBuilds.TryDequeue(out _))
+        {
+        }
+    }
+
+    private ChunkKey GetChunkKey(PlanetCellId cell)
+    {
+        int chunkSize = Mathf.Max(8, ChunkSizeInCells);
+        return new ChunkKey(cell.Face, cell.Radius / chunkSize, cell.U / chunkSize, cell.V / chunkSize);
+    }
+
+    private PlanetChunk GetOrCreateChunk(ChunkKey key)
+    {
+        if (chunks.TryGetValue(key, out PlanetChunk? existingChunk))
+        {
+            return existingChunk;
+        }
+
+        Node3D root = new()
+        {
+            Name = $"Chunk_{key.Face}_{key.RadiusChunk}_{key.UChunk}_{key.VChunk}"
+        };
+        chunkRoot!.AddChild(root);
+
+        MeshInstance3D meshInstance = new() { Name = "Mesh" };
+        root.AddChild(meshInstance);
+
+        StaticBody3D collisionBody = new() { Name = "Collider" };
+        root.AddChild(collisionBody);
+
+        CollisionShape3D collisionShape = new() { Name = "CollisionShape3D" };
+        collisionBody.AddChild(collisionShape);
+
+        PlanetChunk chunk = new(key, root, meshInstance, collisionBody, collisionShape);
+        chunks[key] = chunk;
+        return chunk;
+    }
+
+    private void DestroyChunk(ChunkKey key)
+    {
+        if (!chunks.TryGetValue(key, out PlanetChunk? chunk))
+        {
+            return;
+        }
+
+        chunkBodiesById.Remove(chunk.CollisionBody.GetInstanceId());
+        latestRequestedRevisions.Remove(key);
+        chunk.Root.QueueFree();
+        chunks.Remove(key);
+    }
+
+    private void BuildFarShell()
+    {
+        if (farShellMesh == null)
+        {
+            return;
+        }
+
+        int resolution = Mathf.Max(8, FarShellFaceResolution);
+        List<Vector3> vertices = [];
+        List<Vector3> normals = [];
+        List<Vector2> uvs = [];
+        List<Color> colors = [];
+        List<int> indices = [];
+        Rect2 atlasRect = GetAtlasRect(VoxelBlockType.Grass);
+        Color color = Colors.White;
+        float radius = ApproximateSurfaceRadius;
+
+        for (int face = 0; face < FaceNormals.Length; face++)
+        {
+            for (int u = 0; u < resolution; u++)
+            {
+                for (int v = 0; v < resolution; v++)
+                {
+                    Vector3 d00 = GetAdjustedSphericalDirection(face, GetFarShellCoordinate(u, resolution), GetFarShellCoordinate(v, resolution));
+                    Vector3 d10 = GetAdjustedSphericalDirection(face, GetFarShellCoordinate(u + 1, resolution), GetFarShellCoordinate(v, resolution));
+                    Vector3 d11 = GetAdjustedSphericalDirection(face, GetFarShellCoordinate(u + 1, resolution), GetFarShellCoordinate(v + 1, resolution));
+                    Vector3 d01 = GetAdjustedSphericalDirection(face, GetFarShellCoordinate(u, resolution), GetFarShellCoordinate(v + 1, resolution));
+
+                    AddQuad(
+                        d00 * radius,
+                        d10 * radius,
+                        d11 * radius,
+                        d01 * radius,
+                        atlasRect,
+                        color,
+                        new RaycastTriangleInfo(default, CellFace.Outward),
+                        vertices,
+                        normals,
+                        uvs,
+                        colors,
+                        indices,
+                        null,
+                        null);
+                }
+            }
+        }
+
+        ArrayMesh mesh = new();
+        Godot.Collections.Array arrays = [];
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = vertices.ToArray();
+        arrays[(int)Mesh.ArrayType.Normal] = normals.ToArray();
+        arrays[(int)Mesh.ArrayType.TexUV] = uvs.ToArray();
+        arrays[(int)Mesh.ArrayType.Color] = colors.ToArray();
+        arrays[(int)Mesh.ArrayType.Index] = indices.ToArray();
+        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        mesh.SurfaceSetMaterial(0, planetMaterial);
+        farShellMesh.Mesh = mesh;
+    }
+
+    private static float GetFarShellCoordinate(int index, int resolution)
+    {
+        return (index / (float)resolution) * 2f - 1f;
+    }
+
+    private WorldSnapshot CreateWorldSnapshot()
+    {
+        lock (worldDataLock)
+        {
+            return new WorldSnapshot(
+                new Dictionary<PlanetCellId, VoxelBlockType>(placedBlocks),
+                new HashSet<PlanetCellId>(removedCells),
+                new PlanetGenerationConfig(
+                    BaseRadiusInBlocks,
+                    HeightVariationInBlocks,
+                    NoiseScale,
+                    WorldSeed,
+                    FaceCoordinateUniformity,
+                    PolynomialWarpBias,
+                    DistortionOptimizedRotationEuler,
+                    LocalCellDeformation,
+                    BlockSize,
+                    faceResolution,
+                    ChunkSizeInCells,
+                    SurfaceShellDepthInBlocks,
+                    ExtraOutwardBlocks,
+                    CullFacesAgainstNeighborBlocks,
+                    UseDebugColors));
+        }
+    }
+
+    private void RequestChunkBuild(ChunkKey key, bool wantsCollision, WorldSnapshot snapshot)
+    {
+        int revision = ++buildRevisionCounter;
+        latestRequestedRevisions[key] = revision;
+
+        if (chunks.TryGetValue(key, out PlanetChunk? chunk))
+        {
+            chunk.RequestedRevision = revision;
+            chunk.WantsCollision = wantsCollision;
+        }
+
+        ChunkBuildRequest request = new(key, wantsCollision, revision, snapshot, GetAtlasRect(VoxelBlockType.Grass), atlasUvRects);
+        _ = Task.Run(() =>
+        {
+            ChunkBuildResult result = BuildChunk(request);
+            completedBuilds.Enqueue(result);
+        });
+    }
+
+    private void BuildChunkImmediate(ChunkKey key, bool wantsCollision, WorldSnapshot snapshot)
+    {
+        int revision = ++buildRevisionCounter;
+        latestRequestedRevisions[key] = revision;
+
+        ChunkBuildRequest request = new(key, wantsCollision, revision, snapshot, GetAtlasRect(VoxelBlockType.Grass), atlasUvRects);
+        ApplyChunkBuildResult(BuildChunk(request));
+    }
+
+    private void ApplyCompletedBuilds()
+    {
+        int processed = 0;
+        while (processed < MaxCompletedBuildsPerFrame && completedBuilds.TryDequeue(out ChunkBuildResult result))
+        {
+            processed++;
+            ApplyChunkBuildResult(result);
+        }
+    }
+
+    private void ApplyChunkBuildResult(ChunkBuildResult result)
+    {
+        if (!activeRenderChunks.Contains(result.Key))
+        {
+            return;
+        }
+
+        if (latestRequestedRevisions.TryGetValue(result.Key, out int latestRevision) && latestRevision > result.Revision)
+        {
+            return;
+        }
+
+        PlanetChunk chunk = GetOrCreateChunk(result.Key);
+        if (chunk.RequestedRevision > result.Revision)
+        {
+            return;
+        }
+
+        chunk.RequestedRevision = result.Revision;
+        chunk.WantsCollision = result.WantsCollision;
+        chunk.RaycastTriangles.Clear();
+
+        if (result.Vertices.Length == 0)
+        {
+            DestroyChunk(result.Key);
+            return;
+        }
+
+        ArrayMesh mesh = new();
+        Godot.Collections.Array arrays = [];
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = result.Vertices;
+        arrays[(int)Mesh.ArrayType.Normal] = result.Normals;
+        arrays[(int)Mesh.ArrayType.TexUV] = result.Uvs;
+        arrays[(int)Mesh.ArrayType.Color] = result.Colors;
+        arrays[(int)Mesh.ArrayType.Index] = result.Indices;
+        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        mesh.SurfaceSetMaterial(0, planetMaterial);
+        chunk.MeshInstance.Mesh = mesh;
+
+        if (result.WantsCollision)
+        {
+            chunk.RaycastTriangles.AddRange(result.RaycastTriangles);
+            chunk.CollisionShape.Shape = new ConcavePolygonShape3D
+            {
+                Data = result.CollisionFaces
+            };
+            chunkBodiesById[chunk.CollisionBody.GetInstanceId()] = chunk;
+        }
+        else
+        {
+            chunk.CollisionShape.Shape = null;
+            chunkBodiesById.Remove(chunk.CollisionBody.GetInstanceId());
+        }
+    }
+
+    private static ChunkBuildResult BuildChunk(ChunkBuildRequest request)
+    {
+        ChunkKey key = request.Key;
+        PlanetGenerationConfig config = request.Snapshot.Config;
+        int chunkSize = Mathf.Max(8, config.ChunkSizeInCells);
+        int radiusStart = key.RadiusChunk * chunkSize;
+        int radiusEnd = radiusStart + chunkSize;
+        int uStart = key.UChunk * chunkSize;
+        int uEnd = Mathf.Min(config.FaceResolution, uStart + chunkSize);
+        int vStart = key.VChunk * chunkSize;
+        int vEnd = Mathf.Min(config.FaceResolution, vStart + chunkSize);
+
+        if (uStart >= config.FaceResolution || vStart >= config.FaceResolution)
+        {
+            return ChunkBuildResult.Empty(key, request.Revision, request.WantsCollision);
+        }
+
+        List<Vector3> vertices = [];
+        List<Vector3> normals = [];
+        List<Vector2> uvs = [];
+        List<Color> colors = [];
+        List<int> indices = [];
+        List<Vector3> collisionFaces = [];
+        List<RaycastTriangleInfo> raycastTriangles = [];
+        Dictionary<long, int> localHeightCache = [];
+        FastNoiseLite localNoise = CreateLocalNoise(config);
+
+        for (int radius = radiusStart; radius < radiusEnd; radius++)
+        {
+            for (int u = uStart; u < uEnd; u++)
+            {
+                for (int v = vStart; v < vEnd; v++)
+                {
+                    PlanetCellId cell = new(key.Face, radius, u, v);
+                    if (!HasBlockSnapshot(cell, request.Snapshot, localHeightCache, localNoise))
+                    {
+                        continue;
+                    }
+
+                    AddVisibleFacesForCellSnapshot(cell, request, localHeightCache, localNoise, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
+                }
+            }
+        }
+
+        return new ChunkBuildResult(
+            key,
+            request.Revision,
+            request.WantsCollision,
+            vertices.ToArray(),
+            normals.ToArray(),
+            uvs.ToArray(),
+            colors.ToArray(),
+            indices.ToArray(),
+            collisionFaces.ToArray(),
+            raycastTriangles.ToArray());
+    }
+
+    private static void AddVisibleFacesForCellSnapshot(
+        PlanetCellId cell,
+        ChunkBuildRequest request,
+        Dictionary<long, int> localHeightCache,
+        FastNoiseLite noiseSource,
+        List<Vector3> vertices,
+        List<Vector3> normals,
+        List<Vector2> uvs,
+        List<Color> colors,
+        List<int> indices,
+        List<Vector3> collisionFaces,
+        List<RaycastTriangleInfo> raycastTriangles)
+    {
+        Vector3[] corners = GetCellCornersStatic(cell, request.Snapshot.Config);
+        Rect2 atlasRect = GetAtlasRectStatic(GetBlockTypeSnapshot(cell, request.Snapshot, localHeightCache, noiseSource), request.AtlasRects);
+        Color vertexColor = request.Snapshot.Config.UseDebugColors ? GetDebugColor(cell) : Colors.White;
+
+        AddFaceIfVisibleSnapshot(cell, CellFace.Outward, [corners[4], corners[5], corners[6], corners[7]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
+        AddFaceIfVisibleSnapshot(cell, CellFace.Inward, [corners[0], corners[3], corners[2], corners[1]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
+        AddFaceIfVisibleSnapshot(cell, CellFace.PositiveU, [corners[1], corners[2], corners[6], corners[5]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
+        AddFaceIfVisibleSnapshot(cell, CellFace.NegativeU, [corners[0], corners[4], corners[7], corners[3]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
+        AddFaceIfVisibleSnapshot(cell, CellFace.PositiveV, [corners[3], corners[7], corners[6], corners[2]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
+        AddFaceIfVisibleSnapshot(cell, CellFace.NegativeV, [corners[0], corners[1], corners[5], corners[4]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
+    }
+
+    private static void AddFaceIfVisibleSnapshot(
+        PlanetCellId cell,
+        CellFace face,
+        Vector3[] quad,
+        Rect2 atlasRect,
+        Color vertexColor,
+        ChunkBuildRequest request,
+        Dictionary<long, int> localHeightCache,
+        FastNoiseLite noiseSource,
+        List<Vector3> vertices,
+        List<Vector3> normals,
+        List<Vector2> uvs,
+        List<Color> colors,
+        List<int> indices,
+        List<Vector3> collisionFaces,
+        List<RaycastTriangleInfo> raycastTriangles)
+    {
+        if (request.Snapshot.Config.CullFacesAgainstNeighborBlocks &&
+            TryGetAdjacentCellStatic(cell, face, request.Snapshot.Config.FaceResolution, out PlanetCellId neighbor) &&
+            HasBlockSnapshot(neighbor, request.Snapshot, localHeightCache, noiseSource))
+        {
+            return;
+        }
+
+        AddQuad(
+            quad[0],
+            quad[1],
+            quad[2],
+            quad[3],
+            atlasRect,
+            vertexColor,
+            new RaycastTriangleInfo(cell, face),
+            vertices,
+            normals,
+            uvs,
+            colors,
+            indices,
+            request.WantsCollision ? collisionFaces : null,
+            request.WantsCollision ? raycastTriangles : null);
+    }
+
+    private static void AddQuad(
+        Vector3 a,
+        Vector3 b,
+        Vector3 c,
+        Vector3 d,
+        Rect2 atlasRect,
+        Color vertexColor,
+        RaycastTriangleInfo hitInfo,
+        List<Vector3> vertices,
+        List<Vector3> normals,
+        List<Vector2> uvs,
+        List<Color> colors,
+        List<int> indices,
+        List<Vector3>? collisionFaces,
+        List<RaycastTriangleInfo>? raycastTriangles)
+    {
+        int start = vertices.Count;
+        Vector3 faceNormal = (b - a).Cross(c - a).Normalized();
+        float minU = atlasRect.Position.X;
+        float minV = atlasRect.Position.Y;
+        float maxU = atlasRect.Position.X + atlasRect.Size.X;
+        float maxV = atlasRect.Position.Y + atlasRect.Size.Y;
+
+        vertices.Add(a);
+        vertices.Add(b);
+        vertices.Add(c);
+        vertices.Add(d);
+
+        normals.Add(faceNormal);
+        normals.Add(faceNormal);
+        normals.Add(faceNormal);
+        normals.Add(faceNormal);
+
+        uvs.Add(new Vector2(minU, maxV));
+        uvs.Add(new Vector2(maxU, maxV));
+        uvs.Add(new Vector2(maxU, minV));
+        uvs.Add(new Vector2(minU, minV));
+
+        colors.Add(vertexColor);
+        colors.Add(vertexColor);
+        colors.Add(vertexColor);
+        colors.Add(vertexColor);
+
+        indices.Add(start + 0);
+        indices.Add(start + 1);
+        indices.Add(start + 2);
+        indices.Add(start + 0);
+        indices.Add(start + 2);
+        indices.Add(start + 3);
+
+        if (collisionFaces == null || raycastTriangles == null)
+        {
+            return;
+        }
+
+        collisionFaces.Add(a);
+        collisionFaces.Add(b);
+        collisionFaces.Add(c);
+        raycastTriangles.Add(hitInfo);
+
+        collisionFaces.Add(c);
+        collisionFaces.Add(b);
+        collisionFaces.Add(a);
+        raycastTriangles.Add(hitInfo);
+
+        collisionFaces.Add(a);
+        collisionFaces.Add(c);
+        collisionFaces.Add(d);
+        raycastTriangles.Add(hitInfo);
+
+        collisionFaces.Add(d);
+        collisionFaces.Add(c);
+        collisionFaces.Add(a);
+        raycastTriangles.Add(hitInfo);
+    }
+
+    private void RemoveBlockInternal(PlanetCellId cell)
+    {
+        if (!HasBlock(cell))
+        {
+            return;
+        }
+
+        bool defaultSolid = IsDefaultSolid(cell);
+        if (placedBlocks.ContainsKey(cell))
+        {
+            placedBlocks.Remove(cell);
+
+            if (defaultSolid)
+            {
+                removedCells.Add(cell);
+            }
+        }
+        else if (defaultSolid)
+        {
+            removedCells.Add(cell);
+        }
+    }
+
+    private PlanetPlayer? ResolvePlayer()
+    {
+        if (!PlayerPath.IsEmpty)
+        {
+            return GetNodeOrNull<PlanetPlayer>(PlayerPath);
+        }
+
+        return GetNodeOrNull<PlanetPlayer>("../Player");
+    }
+
+    private ChunkAnchor GetAnchorFromWorldPosition(Vector3 worldPosition)
+    {
+        WrappedColumn column = ProjectDirectionToColumn((worldPosition - PlanetCenter).Normalized(), faceResolution);
+        return new ChunkAnchor(column.Face, column.U, column.V);
+    }
+
+    private static WrappedColumn ProjectDirectionToColumn(Vector3 direction, int resolution)
+    {
+        return ProjectCubePointToColumnStatic(direction, resolution);
+    }
+
+    private static WrappedColumn WrapColumn(int face, int u, int v, int faceResolution)
+    {
+        float s = (u + 0.5f) / faceResolution * 2f - 1f;
+        float t = (v + 0.5f) / faceResolution * 2f - 1f;
+        return ProjectCubePointToColumnStatic(GetCubePoint(face, s, t), faceResolution);
+    }
+
+    private WrappedColumn WrapColumn(int face, int u, int v)
+    {
+        return WrapColumn(face, u, v, faceResolution);
+    }
+
+    private static WrappedColumn ProjectCubePointToColumnStatic(Vector3 cubePoint, int resolution)
+    {
+        float absoluteX = Mathf.Abs(cubePoint.X);
+        float absoluteY = Mathf.Abs(cubePoint.Y);
+        float absoluteZ = Mathf.Abs(cubePoint.Z);
+
+        int face = absoluteX >= absoluteY && absoluteX >= absoluteZ
+            ? (cubePoint.X >= 0f ? 0 : 1)
+            : absoluteY >= absoluteZ
+                ? (cubePoint.Y >= 0f ? 2 : 3)
+                : (cubePoint.Z >= 0f ? 4 : 5);
+
+        float dominant = Mathf.Max(absoluteX, Mathf.Max(absoluteY, absoluteZ));
+        float s = cubePoint.Dot(FaceAxisU[face]) / dominant;
+        float t = cubePoint.Dot(FaceAxisV[face]) / dominant;
+        int wrappedU = Mathf.Clamp(Mathf.FloorToInt(((s + 1f) * 0.5f) * resolution), 0, resolution - 1);
+        int wrappedV = Mathf.Clamp(Mathf.FloorToInt(((t + 1f) * 0.5f) * resolution), 0, resolution - 1);
+        return new WrappedColumn(face, wrappedU, wrappedV);
+    }
+
+    private static bool TryGetAdjacentCellStatic(PlanetCellId cell, CellFace face, int faceResolution, out PlanetCellId adjacentCell)
+    {
+        adjacentCell = default;
+        switch (face)
+        {
+            case CellFace.Outward:
+                adjacentCell = new PlanetCellId(cell.Face, cell.Radius + 1, cell.U, cell.V);
+                return true;
+            case CellFace.Inward:
+                if (cell.Radius == 0)
+                {
+                    return false;
+                }
+
+                adjacentCell = new PlanetCellId(cell.Face, cell.Radius - 1, cell.U, cell.V);
+                return true;
+            case CellFace.NegativeU:
+            case CellFace.PositiveU:
+            case CellFace.NegativeV:
+            case CellFace.PositiveV:
+                WrappedColumn wrapped = face switch
+                {
+                    CellFace.NegativeU => WrapColumn(cell.Face, cell.U - 1, cell.V, faceResolution),
+                    CellFace.PositiveU => WrapColumn(cell.Face, cell.U + 1, cell.V, faceResolution),
+                    CellFace.NegativeV => WrapColumn(cell.Face, cell.U, cell.V - 1, faceResolution),
+                    CellFace.PositiveV => WrapColumn(cell.Face, cell.U, cell.V + 1, faceResolution),
+                    _ => throw new ArgumentOutOfRangeException(nameof(face), face, null)
+                };
+                adjacentCell = new PlanetCellId(wrapped.Face, cell.Radius, wrapped.U, wrapped.V);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private bool TryGetAdjacentCell(PlanetCellId cell, CellFace face, out PlanetCellId adjacentCell)
+    {
+        return TryGetAdjacentCellStatic(cell, face, faceResolution, out adjacentCell);
+    }
+
+    private static bool HasBlockSnapshot(PlanetCellId cell, WorldSnapshot snapshot, Dictionary<long, int> localHeightCache, FastNoiseLite noiseSource)
+    {
+        if (cell.Face < 0 || cell.Face >= FaceNormals.Length || cell.U < 0 || cell.U >= snapshot.Config.FaceResolution || cell.V < 0 || cell.V >= snapshot.Config.FaceResolution || cell.Radius < 0)
+        {
+            return false;
+        }
+
+        if (snapshot.PlacedBlocks.TryGetValue(cell, out VoxelBlockType placed))
+        {
+            return placed != VoxelBlockType.Air;
+        }
+
+        if (snapshot.RemovedCells.Contains(cell))
+        {
+            return false;
+        }
+
+        return cell.Radius < GetDefaultColumnHeightStatic(cell.Face, cell.U, cell.V, snapshot.Config, localHeightCache, noiseSource);
+    }
+
+    private static VoxelBlockType GetBlockTypeSnapshot(PlanetCellId cell, WorldSnapshot snapshot, Dictionary<long, int> localHeightCache, FastNoiseLite noiseSource)
+    {
+        if (snapshot.PlacedBlocks.TryGetValue(cell, out VoxelBlockType placed))
+        {
+            return placed;
+        }
+
+        if (snapshot.RemovedCells.Contains(cell))
+        {
+            return VoxelBlockType.Air;
+        }
+
+        int surfaceRadius = GetDefaultColumnHeightStatic(cell.Face, cell.U, cell.V, snapshot.Config, localHeightCache, noiseSource) - 1;
+        if (cell.Radius == surfaceRadius)
+        {
+            return VoxelBlockType.Grass;
+        }
+
+        if (cell.Radius >= surfaceRadius - 2)
+        {
+            return VoxelBlockType.Dirt;
+        }
+
+        return VoxelBlockType.Stone;
+    }
+
+    private static int GetDefaultColumnHeightStatic(int face, int u, int v, PlanetGenerationConfig config, Dictionary<long, int> cache, FastNoiseLite noiseSource)
+    {
+        long key = ((long)face << 42) | ((long)u << 21) | (uint)v;
+        if (cache.TryGetValue(key, out int cached))
+        {
+            return cached;
+        }
+
+        Vector3 direction = GetDirectionForCellCenterStatic(face, u, v, config.FaceResolution, config.FaceCoordinateUniformity, config.PolynomialWarpBias);
+        Vector3 rotated = ApplyNoiseRotationStatic(direction, config.NoiseScale, config.DistortionOptimizedRotationEuler);
+        float sample = noiseSource.GetNoise3D(rotated.X, rotated.Y, rotated.Z);
+        int height = Mathf.Max(1, config.BaseRadiusInBlocks + Mathf.RoundToInt(sample * config.HeightVariationInBlocks));
+        cache[key] = height;
+        return height;
+    }
+
+    private int GetDefaultColumnHeight(int face, int u, int v)
+    {
+        lock (worldDataLock)
+        {
+            long key = ((long)face << 42) | ((long)u << 21) | (uint)v;
+            if (defaultColumnHeights.TryGetValue(key, out int cached))
+            {
+                return cached;
+            }
+
+            Vector3 direction = GetDirectionForCellCenterStatic(face, u, v, faceResolution, FaceCoordinateUniformity, PolynomialWarpBias);
+            Vector3 rotated = ApplyNoiseRotationStatic(direction, NoiseScale, DistortionOptimizedRotationEuler);
+            int height = Mathf.Max(1, BaseRadiusInBlocks + Mathf.RoundToInt(noise!.GetNoise3D(rotated.X, rotated.Y, rotated.Z) * HeightVariationInBlocks));
+            defaultColumnHeights[key] = height;
+            return height;
+        }
+    }
+
+    private static Vector3 GetDirectionForCellCenterStatic(int face, int u, int v, int resolution, float uniformity, float warpBias)
+    {
+        float s = GetWarpedFaceCoordinateStatic(u + 0.5f, resolution, uniformity, warpBias);
+        float t = GetWarpedFaceCoordinateStatic(v + 0.5f, resolution, uniformity, warpBias);
+        return GetAdjustedSphericalDirection(face, s, t);
+    }
+
+    private static Vector3[] GetCellCornersStatic(PlanetCellId cell, PlanetGenerationConfig config)
+    {
+        float s0 = GetWarpedFaceCoordinateStatic(cell.U, config.FaceResolution, config.FaceCoordinateUniformity, config.PolynomialWarpBias);
+        float s1 = GetWarpedFaceCoordinateStatic(cell.U + 1, config.FaceResolution, config.FaceCoordinateUniformity, config.PolynomialWarpBias);
+        float t0 = GetWarpedFaceCoordinateStatic(cell.V, config.FaceResolution, config.FaceCoordinateUniformity, config.PolynomialWarpBias);
+        float t1 = GetWarpedFaceCoordinateStatic(cell.V + 1, config.FaceResolution, config.FaceCoordinateUniformity, config.PolynomialWarpBias);
+
+        Vector3 d00 = GetSharedCornerDirectionStatic(cell.Face, s0, t0, config.LocalCellDeformation);
+        Vector3 d10 = GetSharedCornerDirectionStatic(cell.Face, s1, t0, config.LocalCellDeformation);
+        Vector3 d11 = GetSharedCornerDirectionStatic(cell.Face, s1, t1, config.LocalCellDeformation);
+        Vector3 d01 = GetSharedCornerDirectionStatic(cell.Face, s0, t1, config.LocalCellDeformation);
+        float innerRadius = cell.Radius * config.BlockSize;
+        float outerRadius = (cell.Radius + 1) * config.BlockSize;
+
+        return
+        [
+            d00 * innerRadius,
+            d10 * innerRadius,
+            d11 * innerRadius,
+            d01 * innerRadius,
+            d00 * outerRadius,
+            d10 * outerRadius,
+            d11 * outerRadius,
+            d01 * outerRadius
+        ];
+    }
+
+    private Vector3[] GetCellCorners(PlanetCellId cell)
+    {
+        PlanetGenerationConfig config = new(
+            BaseRadiusInBlocks,
+            HeightVariationInBlocks,
+            NoiseScale,
+            WorldSeed,
+            FaceCoordinateUniformity,
+            PolynomialWarpBias,
+            DistortionOptimizedRotationEuler,
+            LocalCellDeformation,
+            BlockSize,
+            faceResolution,
+            ChunkSizeInCells,
+            SurfaceShellDepthInBlocks,
+            ExtraOutwardBlocks,
+            CullFacesAgainstNeighborBlocks,
+            UseDebugColors);
+        Vector3[] local = GetCellCornersStatic(cell, config);
+        for (int i = 0; i < local.Length; i++)
+        {
+            local[i] += PlanetCenter;
+        }
+
+        return local;
+    }
+
+    private static float GetWarpedFaceCoordinateStatic(float gridPosition, int resolution, float uniformity, float warpBias)
+    {
+        float raw = (gridPosition / resolution) * 2f - 1f;
+        float cubicWarp = raw + (raw * raw * raw - raw) * Mathf.Clamp(warpBias, 0f, 1f);
+        return Mathf.Clamp(Mathf.Lerp(raw, cubicWarp, Mathf.Clamp(uniformity, 0f, 1f)), -1f, 1f);
+    }
+
+    private static Vector3 GetAdjustedSphericalDirection(int face, float s, float t)
+    {
+        Vector3 cubePoint = GetCubePoint(face, s, t);
+        float x = cubePoint.X;
+        float y = cubePoint.Y;
+        float z = cubePoint.Z;
+        float x2 = x * x;
+        float y2 = y * y;
+        float z2 = z * z;
+
+        Vector3 spherical = new(
+            x * Mathf.Sqrt(Mathf.Max(0f, 1f - 0.5f * y2 - 0.5f * z2 + (y2 * z2) / 3f)),
+            y * Mathf.Sqrt(Mathf.Max(0f, 1f - 0.5f * z2 - 0.5f * x2 + (z2 * x2) / 3f)),
+            z * Mathf.Sqrt(Mathf.Max(0f, 1f - 0.5f * x2 - 0.5f * y2 + (x2 * y2) / 3f)));
+
+        return spherical.Normalized();
+    }
+
+    private static Vector3 GetSharedCornerDirectionStatic(int face, float s, float t, float deformation)
+    {
+        Vector3 ascDirection = GetAdjustedSphericalDirection(face, s, t);
+        if (deformation >= 0.999f)
+        {
+            return ascDirection;
+        }
+
+        return GetCubePoint(face, s, t).Normalized().Slerp(ascDirection, Mathf.Clamp(deformation, 0f, 1f)).Normalized();
+    }
+
+    private static Vector3 GetCubePoint(int face, float s, float t)
+    {
+        return FaceNormals[face] + FaceAxisU[face] * s + FaceAxisV[face] * t;
+    }
+
+    private static Vector3 ApplyNoiseRotationStatic(Vector3 direction, float noiseScale, Vector3 rotationDegrees)
+    {
+        Vector3 radians = rotationDegrees * (Mathf.Pi / 180f);
+        Vector3 rotated = direction.Rotated(Vector3.Right, radians.X);
+        rotated = rotated.Rotated(Vector3.Up, radians.Y);
+        rotated = rotated.Rotated(Vector3.Back, radians.Z);
+        return rotated * Mathf.Max(0.01f, noiseScale);
+    }
+
+    private static FastNoiseLite CreateLocalNoise(PlanetGenerationConfig config)
+    {
+        FastNoiseLite localNoise = new()
+        {
+            Seed = config.WorldSeed,
+            NoiseType = FastNoiseLite.NoiseTypeEnum.SimplexSmooth,
+            FractalType = FastNoiseLite.FractalTypeEnum.Fbm,
+            FractalOctaves = 4,
+            FractalLacunarity = 2f,
+            FractalGain = 0.5f,
+            Frequency = Mathf.Max(0.01f, config.NoiseScale / Mathf.Max(1f, config.BaseRadiusInBlocks))
+        };
+        return localNoise;
+    }
+
+    private static Rect2 GetAtlasRectStatic(VoxelBlockType blockType, IReadOnlyDictionary<VoxelBlockType, Rect2> atlasRects)
+    {
+        return atlasRects.TryGetValue(blockType, out Rect2 rect) ? rect : atlasRects[VoxelBlockType.Stone];
+    }
+
+    private static Color GetDebugColor(PlanetCellId cell)
+    {
+        return cell.Face switch
+        {
+            0 => new Color(0.95f, 0.76f, 0.76f),
+            1 => new Color(0.74f, 0.88f, 0.96f),
+            2 => new Color(0.98f, 0.96f, 0.71f),
+            3 => new Color(0.86f, 0.78f, 0.98f),
+            4 => new Color(0.76f, 0.95f, 0.84f),
+            _ => new Color(1f, 0.86f, 0.74f)
+        };
+    }
+
+    private Rect2 GetAtlasRect(VoxelBlockType blockType)
+    {
+        return GetAtlasRectStatic(blockType, atlasUvRects);
+    }
+
+    private bool IsDefaultSolid(PlanetCellId cell)
+    {
+        return cell.Radius < GetDefaultColumnHeight(cell.Face, cell.U, cell.V);
+    }
+
+    private VoxelBlockType GetDefaultBlockType(PlanetCellId cell)
+    {
+        int surfaceRadius = GetDefaultColumnHeight(cell.Face, cell.U, cell.V) - 1;
+        if (cell.Radius == surfaceRadius)
+        {
+            return VoxelBlockType.Grass;
+        }
+
+        if (cell.Radius >= surfaceRadius - 2)
+        {
+            return VoxelBlockType.Dirt;
+        }
+
+        return VoxelBlockType.Stone;
+    }
+
+    private bool IsValidCell(PlanetCellId cell)
+    {
+        return cell.Face >= 0 &&
+               cell.Face < FaceNormals.Length &&
+               cell.Radius >= 0 &&
+               cell.U >= 0 &&
+               cell.U < faceResolution &&
+               cell.V >= 0 &&
+               cell.V < faceResolution;
+    }
+
+    private readonly record struct ChunkKey(int Face, int RadiusChunk, int UChunk, int VChunk);
+    private readonly record struct WrappedColumn(int Face, int U, int V);
+    private readonly record struct ChunkAnchor(int Face, int U, int V);
+    private readonly record struct RaycastTriangleInfo(PlanetCellId Cell, CellFace Face);
+    private readonly record struct PlanetGenerationConfig(
+        int BaseRadiusInBlocks,
+        float HeightVariationInBlocks,
+        float NoiseScale,
+        int WorldSeed,
+        float FaceCoordinateUniformity,
+        float PolynomialWarpBias,
+        Vector3 DistortionOptimizedRotationEuler,
+        float LocalCellDeformation,
+        float BlockSize,
+        int FaceResolution,
+        int ChunkSizeInCells,
+        int SurfaceShellDepthInBlocks,
+        int ExtraOutwardBlocks,
+        bool CullFacesAgainstNeighborBlocks,
+        bool UseDebugColors = false);
+
+    private readonly record struct WorldSnapshot(
+        Dictionary<PlanetCellId, VoxelBlockType> PlacedBlocks,
+        HashSet<PlanetCellId> RemovedCells,
+        PlanetGenerationConfig Config);
+
+    private readonly record struct ChunkBuildRequest(
+        ChunkKey Key,
+        bool WantsCollision,
+        int Revision,
+        WorldSnapshot Snapshot,
+        Rect2 DefaultAtlasRect,
+        IReadOnlyDictionary<VoxelBlockType, Rect2> AtlasRects);
+
+    private readonly record struct ChunkBuildResult(
+        ChunkKey Key,
+        int Revision,
+        bool WantsCollision,
+        Vector3[] Vertices,
+        Vector3[] Normals,
+        Vector2[] Uvs,
+        Color[] Colors,
+        int[] Indices,
+        Vector3[] CollisionFaces,
+        RaycastTriangleInfo[] RaycastTriangles)
+    {
+        public static ChunkBuildResult Empty(ChunkKey key, int revision, bool wantsCollision)
+        {
+            return new ChunkBuildResult(key, revision, wantsCollision, [], [], [], [], [], [], []);
+        }
+    }
+
+    private sealed class PlanetChunk
+    {
+        public PlanetChunk(ChunkKey key, Node3D root, MeshInstance3D meshInstance, StaticBody3D collisionBody, CollisionShape3D collisionShape)
+        {
+            Key = key;
+            Root = root;
+            MeshInstance = meshInstance;
+            CollisionBody = collisionBody;
+            CollisionShape = collisionShape;
+        }
+
+        public ChunkKey Key { get; }
+        public Node3D Root { get; }
+        public MeshInstance3D MeshInstance { get; }
+        public StaticBody3D CollisionBody { get; }
+        public CollisionShape3D CollisionShape { get; }
+        public List<RaycastTriangleInfo> RaycastTriangles { get; } = [];
+        public int RequestedRevision { get; set; }
+        public bool WantsCollision { get; set; }
+    }
+
+    private enum CellFace
+    {
+        Outward,
+        Inward,
+        NegativeU,
+        PositiveU,
+        NegativeV,
+        PositiveV
+    }
 }

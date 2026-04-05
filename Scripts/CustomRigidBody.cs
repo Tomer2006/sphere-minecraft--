@@ -4,12 +4,17 @@ namespace SphereMinecraft;
 
 public partial class CustomRigidBody : CharacterBody3D
 {
+    private const float RotationSharpness = 18f;
+    private const float RotationDeadzoneRadians = 0.0015f;
+    private const float GroundSnapDeadzone = 0.01f;
+
     private float skinWidth = 0.04f;
     private int maxSlideIterations = 4;
     private int maxDepenetrationIterations = 3;
     private float minGroundDot = 0.35f;
     private uint collisionLayer = 2;
     private uint collisionMask = uint.MaxValue;
+    private Vector3 lastGroundNormal = Vector3.Up;
 
     private CollisionShape3D? capsule;
     private CapsuleShape3D? capsuleShape;
@@ -89,7 +94,18 @@ public partial class CustomRigidBody : CharacterBody3D
 
     public void MoveRotation(Quaternion targetRotation, Vector3 upAxis)
     {
-        GlobalBasis = new Basis(targetRotation).Orthonormalized();
+        Quaternion currentRotation = GlobalBasis.GetRotationQuaternion();
+        float angleDelta = currentRotation.AngleTo(targetRotation);
+
+        if (angleDelta <= RotationDeadzoneRadians)
+        {
+            return;
+        }
+
+        float deltaTime = Mathf.Max(0.0001f, (float)GetPhysicsProcessDeltaTime());
+        float blend = 1f - Mathf.Exp(-RotationSharpness * deltaTime);
+        Quaternion nextRotation = currentRotation.Slerp(targetRotation, blend).Normalized();
+        GlobalBasis = new Basis(nextRotation).Orthonormalized();
     }
 
     public void SuppressGrounding(float duration)
@@ -98,11 +114,25 @@ public partial class CustomRigidBody : CharacterBody3D
         IsGrounded = false;
     }
 
+    public void BeginPhysicsStep(float deltaTime)
+    {
+        if (groundingSuppressionTimer <= 0f)
+        {
+            return;
+        }
+
+        groundingSuppressionTimer = Mathf.Max(0f, groundingSuppressionTimer - deltaTime);
+    }
+
     public void RefreshGrounded(Vector3 upAxis, float groundProbeDistance)
     {
-        UpdateGroundingSuppression();
-
         if (IsGroundingSuppressed)
+        {
+            IsGrounded = false;
+            return;
+        }
+
+        if (Velocity.Dot(upAxis) > 0.05f)
         {
             IsGrounded = false;
             return;
@@ -113,10 +143,15 @@ public partial class CustomRigidBody : CharacterBody3D
 
     public void Simulate(Vector3 upAxis, float deltaTime, float groundProbeDistance)
     {
-        UpdateGroundingSuppression();
         MoveWithCollisions(Velocity * deltaTime, upAxis);
 
         if (IsGroundingSuppressed)
+        {
+            IsGrounded = false;
+            return;
+        }
+
+        if (Velocity.Dot(upAxis) > 0.05f)
         {
             IsGrounded = false;
             return;
@@ -129,7 +164,7 @@ public partial class CustomRigidBody : CharacterBody3D
             return;
         }
 
-        if (groundGap > 0.0001f)
+        if (groundGap > GroundSnapDeadzone)
         {
             GlobalPosition -= upAxis.Normalized() * Mathf.Min(groundGap, groundProbeDistance);
         }
@@ -205,13 +240,16 @@ public partial class CustomRigidBody : CharacterBody3D
             -tangentB * (radius * 0.55f)
         };
 
-        float closestDistance = float.MaxValue;
         bool grounded = false;
         groundGap = 0f;
-        groundNormal = normalizedUp;
+        groundNormal = lastGroundNormal;
+        float weightedDistanceSum = 0f;
+        float weightSum = 0f;
+        Vector3 weightedNormalSum = Vector3.Zero;
 
-        foreach (Vector3 probeOffset in probeOffsets)
+        for (int probeIndex = 0; probeIndex < probeOffsets.Length; probeIndex++)
         {
+            Vector3 probeOffset = probeOffsets[probeIndex];
             PhysicsRayQueryParameters3D query = new()
             {
                 From = rayOrigin + probeOffset,
@@ -234,13 +272,30 @@ public partial class CustomRigidBody : CharacterBody3D
             }
 
             float distance = ((Vector3)result["position"]).DistanceTo(rayOrigin + probeOffset);
-            if (distance < closestDistance)
+            float centerBias = probeIndex == 0 ? 1.5f : 1f;
+            float distanceWeight = 1f / Mathf.Max(0.02f, distance);
+            float weight = centerBias * distanceWeight * Mathf.Lerp(0.35f, 1f, normal.Dot(normalizedUp));
+
+            weightedDistanceSum += distance * weight;
+            weightedNormalSum += normal * weight;
+            weightSum += weight;
+            grounded = true;
+        }
+
+        if (grounded && weightSum > 0f)
+        {
+            groundGap = weightedDistanceSum / weightSum - expectedContactDistance;
+            groundNormal = weightedNormalSum.Normalized();
+            if (groundNormal.LengthSquared() < 0.0001f)
             {
-                closestDistance = distance;
-                groundGap = distance - expectedContactDistance;
-                groundNormal = normal;
-                grounded = true;
+                groundNormal = normalizedUp;
             }
+
+            lastGroundNormal = groundNormal;
+        }
+        else
+        {
+            lastGroundNormal = normalizedUp;
         }
 
         return grounded;
@@ -369,16 +424,6 @@ public partial class CustomRigidBody : CharacterBody3D
     }
 
     private bool IsGroundingSuppressed => groundingSuppressionTimer > 0f;
-
-    private void UpdateGroundingSuppression()
-    {
-        if (groundingSuppressionTimer <= 0f)
-        {
-            return;
-        }
-
-        groundingSuppressionTimer = Mathf.Max(0f, groundingSuppressionTimer - (float)GetPhysicsProcessDeltaTime());
-    }
 
     private void EnsureCapsule()
     {
