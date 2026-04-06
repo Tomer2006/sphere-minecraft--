@@ -20,6 +20,9 @@ environment = SubResource("Environment_q2ekf")
 
 [node name="World" type="Node3D" parent="." unique_id=1281627882]
 script = ExtResource("1_a4wja")
+FaceCoordinateUniformity = 1.0
+PolynomialWarpBias = 1.0
+LocalCellDeformation = 1.0
 
 [node name="Sun" type="DirectionalLight3D" parent="." unique_id=837703078]
 process_mode = 3
@@ -32,7 +35,7 @@ shadow_normal_bias = 1.0
 [node name="Player" type="CharacterBody3D" parent="." unique_id=2124311118]
 slide_on_ceiling = false
 script = ExtResource("2_hpj0g")
-SpawnHeightOffset = 50.0
+SpawnHeightOffset = 4.0
 GroundMinDot = 0.3
 MaxDepenetrationIterations = 2
 CollisionMaskBits = 1

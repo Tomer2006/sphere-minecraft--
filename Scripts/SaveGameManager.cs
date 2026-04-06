@@ -77,15 +77,18 @@ public static class SaveGameManager
     {
         saveData = null;
         string slotPath = GetSlotPath(slotId);
+        RuntimeLog.Info(RuntimeLogChannel.Save, $"Attempting to load save slot {slotId} from {ProjectSettings.GlobalizePath(slotPath)}");
 
         if (!FileAccess.FileExists(slotPath))
         {
+            RuntimeLog.Warning(RuntimeLogChannel.Save, $"Load skipped because save slot {slotId} does not exist.");
             return false;
         }
 
         using FileAccess? file = FileAccess.Open(slotPath, FileAccess.ModeFlags.Read);
         if (file is null)
         {
+            RuntimeLog.Error(RuntimeLogChannel.Save, $"Failed to open save slot {slotId} for reading.");
             return false;
         }
 
@@ -94,15 +97,18 @@ public static class SaveGameManager
             saveData = JsonSerializer.Deserialize<SaveGameData>(file.GetAsText(), JsonOptions);
             if (saveData is null)
             {
+                RuntimeLog.Warning(RuntimeLogChannel.Save, $"Save slot {slotId} deserialized to null.");
                 return false;
             }
 
             saveData.SlotId = slotId;
+            RuntimeLog.Info(RuntimeLogChannel.Save,
+                $"Loaded save slot {slotId}. Name={saveData.SaveName}, Version={saveData.Version}, SavedAtUtc={saveData.SavedAtUtc}");
             return true;
         }
         catch (Exception exception)
         {
-            GD.PushError("Failed to load save file: " + exception.Message);
+            RuntimeLog.Error(RuntimeLogChannel.Save, "Failed to load save file: " + exception.Message);
             return false;
         }
     }
@@ -128,6 +134,7 @@ public static class SaveGameManager
         using FileAccess? file = FileAccess.Open(GetSlotPath(slotId), FileAccess.ModeFlags.Write);
         if (file is null)
         {
+            RuntimeLog.Error(RuntimeLogChannel.Save, $"Failed to open save slot {slotId} for writing.");
             return false;
         }
 
@@ -136,11 +143,13 @@ public static class SaveGameManager
             file.StoreString(JsonSerializer.Serialize(saveData, JsonOptions));
             CurrentSlotId = slotId;
             CurrentSaveName = saveData.SaveName;
+            RuntimeLog.Info(RuntimeLogChannel.Save,
+                $"Saved slot {slotId}. Name={saveData.SaveName}, WorldBlocks={saveData.World.Blocks.Count}, RemovedCells={saveData.World.RemovedCells.Count}");
             return true;
         }
         catch (Exception exception)
         {
-            GD.PushError("Failed to save game: " + exception.Message);
+            RuntimeLog.Error(RuntimeLogChannel.Save, "Failed to save game: " + exception.Message);
             return false;
         }
     }
@@ -150,9 +159,11 @@ public static class SaveGameManager
         string slotPath = GetSlotPath(slotId);
         if (!FileAccess.FileExists(slotPath))
         {
+            RuntimeLog.Warning(RuntimeLogChannel.Save, $"Delete skipped because slot {slotId} was not found.");
             return;
         }
 
+        RuntimeLog.Info(RuntimeLogChannel.Save, $"Deleting save slot {slotId}.");
         DirAccess.RemoveAbsolute(ProjectSettings.GlobalizePath(slotPath));
 
         if (CurrentSlotId == slotId)
@@ -173,6 +184,8 @@ public static class SaveGameManager
         CurrentSlotId = null;
         CurrentSaveName = options?.SaveName;
         PendingNewGameOptions = options ?? NewGameOptions.CreateDefault();
+        RuntimeLog.Info(RuntimeLogChannel.Save,
+            $"BeginNewGame called. SaveName={CurrentSaveName ?? "<unnamed>"}, Seed={PendingNewGameOptions.WorldSeed}, BaseRadius={PendingNewGameOptions.BaseRadiusInBlocks}");
     }
 
     public static void BeginLoadSlot(string slotId)
@@ -180,12 +193,17 @@ public static class SaveGameManager
         PendingLoadSlotId = slotId;
         PendingNewGameOptions = null;
         CurrentSaveName = null;
+        RuntimeLog.Info(RuntimeLogChannel.Save, $"BeginLoadSlot called for slot {slotId}.");
     }
 
     public static NewGameOptions? ConsumePendingNewGame()
     {
         NewGameOptions? options = PendingNewGameOptions;
         PendingNewGameOptions = null;
+        RuntimeLog.Info(RuntimeLogChannel.Save,
+            options == null
+                ? "ConsumePendingNewGame returned null."
+                : $"ConsumePendingNewGame returned SaveName={options.SaveName}, Seed={options.WorldSeed}.");
         return options;
     }
 

@@ -50,13 +50,15 @@ public partial class PlanetPlayer : CustomRigidBody
 	private ColorRect? crosshairVertical;
 
 	private Vector2 lookInput;
-	private bool jumpPressedThisFrame;
+	private bool jumpQueued;
 	private bool escapePressedThisFrame;
 	private bool primaryPointerPressedThisFrame;
 	private bool secondaryPointerPressedThisFrame;
 	private bool digit1PressedThisFrame;
 	private bool digit2PressedThisFrame;
 	private bool digit3PressedThisFrame;
+	private bool? lastGroundedState;
+	private bool gameplayEnabled = true;
 
 	[ExportGroup("References")]
 	[Export]
@@ -241,6 +243,47 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	public VoxelBlockType SelectedBlock => selectedBlock;
 
+	public bool GameplayEnabled => gameplayEnabled;
+
+	public void SetGameplayEnabled(bool enabled)
+	{
+		gameplayEnabled = enabled;
+		if (!enabled)
+		{
+			ClearFrameInput();
+		}
+	}
+
+	public void PlaceOnPlanetSurfaceTop()
+	{
+		world ??= ResolveWorld();
+		if (world == null)
+		{
+			return;
+		}
+
+		GlobalPosition = world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset);
+		Velocity = Vector3.Zero;
+
+		Vector3 upAxis = GetUpAxis();
+		smoothedUp = upAxis;
+		desiredForward = desiredForward.Slide(upAxis).Normalized();
+
+		if (desiredForward.LengthSquared() < 0.001f)
+		{
+			desiredForward = Vector3.Forward.Slide(upAxis).Normalized();
+		}
+
+		if (desiredForward.LengthSquared() < 0.001f)
+		{
+			desiredForward = Vector3.Right.Slide(upAxis).Normalized();
+		}
+
+		AlignToSurface(upAxis, true);
+		RuntimeLog.Info(RuntimeLogChannel.Player,
+			$"Placed player on top of planet. Position={RuntimeLog.FormatVector(GlobalPosition)}, ApproxSurfaceRadius={world.ApproximateSurfaceRadius:0.00}, UpAxis={RuntimeLog.FormatVector(upAxis)}");
+	}
+
 	public PlayerSaveData CreateSaveData()
 	{
 		return new PlayerSaveData
@@ -290,6 +333,9 @@ public partial class PlanetPlayer : CustomRigidBody
 		}
 
 		AlignToSurface(upAxis, true);
+		world?.RefreshStreamingAroundPlayer();
+		RuntimeLog.Info(RuntimeLogChannel.Player,
+			$"Applied player save data. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(Velocity)}, Pitch={pitch:0.00}, SelectedBlock={selectedBlock}");
 	}
 
 	public override void _Ready()
@@ -299,6 +345,8 @@ public partial class PlanetPlayer : CustomRigidBody
 		ApplyBodySettings();
 		AttachOrCreateCamera();
 		EnsureHud();
+		RuntimeLog.Info(RuntimeLogChannel.Player,
+			$"PlanetPlayer ready. SpawnHeightOffset={spawnHeightOffset:0.00}, CapsuleRadius={capsuleRadius:0.00}, CapsuleHeight={capsuleHeight:0.00}, MoveSpeed={moveSpeed:0.00}, Gravity={gravityStrength:0.00}");
 		CallDeferred(nameof(Start));
 	}
 
@@ -316,6 +364,11 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	public override void _UnhandledInput(InputEvent @event)
 	{
+		if (!gameplayEnabled)
+		{
+			return;
+		}
+
 		if (@event is InputEventMouseMotion mouseMotion && Input.MouseMode == Input.MouseModeEnum.Captured)
 		{
 			lookInput += mouseMotion.Relative;
@@ -344,7 +397,7 @@ public partial class PlanetPlayer : CustomRigidBody
 		switch (keyEvent.Keycode)
 		{
 			case Key.Space:
-				jumpPressedThisFrame = true;
+				jumpQueued = true;
 				break;
 			case Key.Escape:
 				escapePressedThisFrame = true;
@@ -372,7 +425,7 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		if (world == null)
 		{
-			GD.PushError("PlanetPlayer could not find a PlanetVoxelWorld.");
+			RuntimeLog.Error(RuntimeLogChannel.Player, "PlanetPlayer could not find a PlanetVoxelWorld.");
 			return;
 		}
 
@@ -391,12 +444,15 @@ public partial class PlanetPlayer : CustomRigidBody
 		}
 
 		AlignToSurface(upAxis, true);
+		world.RefreshStreamingAroundPlayer();
 		SetCursorLock(true);
+		RuntimeLog.Info(RuntimeLogChannel.Player,
+			$"Player start complete. SpawnPosition={RuntimeLog.FormatVector(GlobalPosition)}, ApproxSurfaceRadius={world.ApproximateSurfaceRadius:0.00}, UpAxis={RuntimeLog.FormatVector(upAxis)}");
 	}
 
 	private void Update()
 	{
-		if (world == null || body == null)
+		if (!gameplayEnabled || world == null || body == null)
 		{
 			return;
 		}
@@ -410,20 +466,22 @@ public partial class PlanetPlayer : CustomRigidBody
 			HandleBlockInput();
 		}
 
-		if (WasJumpPressedThisFrame())
-		{
-			jumpBufferTimer = jumpBufferTime;
-		}
 	}
 
 	private void FixedUpdate(float deltaTime)
 	{
-		if (world == null || body == null)
+		if (!gameplayEnabled || world == null || body == null)
 		{
 			return;
 		}
 
 		body.BeginPhysicsStep(deltaTime);
+
+		if (ConsumeJumpPress())
+		{
+			jumpBufferTimer = Mathf.Max(jumpBufferTimer, jumpBufferTime);
+			RuntimeLog.Info(RuntimeLogChannel.Player, $"Jump input buffered for {jumpBufferTime:0.00}s.");
+		}
 
 		Vector3 rawUp = GetUpAxis();
 		float smoothingTime = Mathf.Max(upSmoothingTime, 0.0001f);
@@ -448,6 +506,15 @@ public partial class PlanetPlayer : CustomRigidBody
 		}
 
 		SimulateBody(smoothedUp, deltaTime);
+		if (lastGroundedState != body.IsGrounded)
+		{
+			RuntimeLog.Info(RuntimeLogChannel.Player,
+				$"Grounded state changed to {body.IsGrounded}. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(body.Velocity)}, CoyoteTimer={coyoteTimer:0.000}");
+			lastGroundedState = body.IsGrounded;
+		}
+
+		RuntimeLog.InfoEverySeconds(RuntimeLogChannel.Player, $"player-state-{GetInstanceId()}", 0.5,
+			() => $"Player state snapshot. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(body.Velocity)}, Grounded={body.IsGrounded}, MoveInput={moveInput}, JumpBuffer={jumpBufferTimer:0.000}, Coyote={coyoteTimer:0.000}");
 	}
 
 	private void AttachOrCreateCamera()
@@ -498,17 +565,21 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		body.ConfigureCapsule(capsuleRadius, capsuleHeight, capsuleCenter);
 		body.MinGroundDot = groundMinDot;
+		RuntimeLog.Info(RuntimeLogChannel.Player,
+			$"Applied body settings. CapsuleCenter={RuntimeLog.FormatVector(capsuleCenter)}, GroundMinDot={groundMinDot:0.00}, GroundProbeDistance={groundProbeDistance:0.00}");
 	}
 
 	private void HandleCursorLock()
 	{
 		if (WasEscapePressedThisFrame())
 		{
+			RuntimeLog.Info(RuntimeLogChannel.Player, "Unlocking cursor because escape was pressed.");
 			SetCursorLock(false);
 		}
 
 		if (WasPrimaryPointerPressedThisFrame() && Input.MouseMode != Input.MouseModeEnum.Captured)
 		{
+			RuntimeLog.Info(RuntimeLogChannel.Player, "Recapturing cursor because primary mouse button was pressed.");
 			SetCursorLock(true);
 			primaryPointerPressedThisFrame = false;
 		}
@@ -572,7 +643,12 @@ public partial class PlanetPlayer : CustomRigidBody
 		float acceleration = moveAcceleration * (body.IsGrounded ? 1f : airControl);
 		lateralVelocity = lateralVelocity.MoveToward(desiredVelocity, acceleration * deltaTime);
 
-		bool canJump = jumpBufferTimer > 0f && (body.IsGrounded || coyoteTimer > 0f);
+		float nearGroundProbeBonus = Mathf.Max(0.02f, jumpTakeoffDistance + Mathf.Max(0f, -verticalSpeed) * deltaTime);
+		bool canJumpFromNearGround = jumpBufferTimer > 0f &&
+			!body.IsGrounded &&
+			coyoteTimer <= 0f &&
+			body.CanStartGroundJump(upAxis, groundProbeDistance, nearGroundProbeBonus);
+		bool canJump = jumpBufferTimer > 0f && (body.IsGrounded || coyoteTimer > 0f || canJumpFromNearGround);
 		bool didJump = false;
 
 		if (body.IsGrounded)
@@ -604,6 +680,15 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		body.Velocity = lateralVelocity + upAxis * verticalSpeed;
 		body.Simulate(upAxis, deltaTime, groundProbeDistance);
+
+		if (!didJump && jumpBufferTimer > 0f && body.IsGrounded)
+		{
+			Vector3 postSimVelocity = body.Velocity;
+			Vector3 postSimLateralVelocity = postSimVelocity.Slide(upAxis);
+			float postSimVerticalSpeed = Mathf.Max(0f, postSimVelocity.Dot(upAxis));
+			ExecuteJump(upAxis, ref postSimVerticalSpeed);
+			body.Velocity = postSimLateralVelocity + upAxis * postSimVerticalSpeed;
+		}
 	}
 
 	private void AlignToSurface(Vector3 upAxis, bool immediate)
@@ -631,6 +716,7 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	private void HandleBlockInput()
 	{
+		VoxelBlockType previousBlock = selectedBlock;
 		if (WasDigitPressedThisFrame(1))
 		{
 			selectedBlock = VoxelBlockType.Grass;
@@ -642,6 +728,11 @@ public partial class PlanetPlayer : CustomRigidBody
 		else if (WasDigitPressedThisFrame(3))
 		{
 			selectedBlock = VoxelBlockType.Stone;
+		}
+
+		if (selectedBlock != previousBlock)
+		{
+			RuntimeLog.Info(RuntimeLogChannel.Player, $"Selected block changed from {previousBlock} to {selectedBlock}.");
 		}
 
 		if (playerCamera == null)
@@ -669,12 +760,20 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		if (!TryRaycastFromCamera(out CollisionObject3D? collider, out int faceIndex, out Vector3 position, out Vector3 normal))
 		{
+			RuntimeLog.Info(RuntimeLogChannel.Player, "Break block skipped because the camera raycast hit nothing.");
 			return;
 		}
 
 		if (world.TryGetBreakCell(collider, faceIndex, position, normal, out PlanetCellId targetCell))
 		{
+			RuntimeLog.Info(RuntimeLogChannel.Player,
+				$"Breaking block at {targetCell}. FaceIndex={faceIndex}, HitPosition={RuntimeLog.FormatVector(position)}, HitNormal={RuntimeLog.FormatVector(normal)}");
 			world.RemoveBlock(targetCell);
+		}
+		else
+		{
+			RuntimeLog.Info(RuntimeLogChannel.Player,
+				$"Break block raycast hit collider {collider?.Name ?? "<unknown>"} but no breakable cell was resolved. FaceIndex={faceIndex}");
 		}
 	}
 
@@ -687,24 +786,31 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		if (!TryRaycastFromCamera(out CollisionObject3D? collider, out int faceIndex, out Vector3 position, out Vector3 normal))
 		{
+			RuntimeLog.Info(RuntimeLogChannel.Player, "Place block skipped because the camera raycast hit nothing.");
 			return;
 		}
 
 		if (!world.TryGetPlaceCell(collider, faceIndex, position, normal, out PlanetCellId targetCell))
 		{
+			RuntimeLog.Info(RuntimeLogChannel.Player,
+				$"Place block raycast hit collider {collider?.Name ?? "<unknown>"} but no placement cell was resolved. FaceIndex={faceIndex}");
 			return;
 		}
 
 		if (world.HasBlock(targetCell))
 		{
+			RuntimeLog.Info(RuntimeLogChannel.Player, $"Place block skipped because target cell {targetCell} is already occupied.");
 			return;
 		}
 
 		if (Bounds.Intersects(world.GetCellAabb(targetCell)))
 		{
+			RuntimeLog.Info(RuntimeLogChannel.Player, $"Place block skipped because target cell {targetCell} intersects the player bounds.");
 			return;
 		}
 
+		RuntimeLog.Info(RuntimeLogChannel.Player,
+			$"Placing block {selectedBlock} at {targetCell}. FaceIndex={faceIndex}, HitPosition={RuntimeLog.FormatVector(position)}, HitNormal={RuntimeLog.FormatVector(normal)}");
 		world.PlaceBlock(targetCell, selectedBlock);
 	}
 
@@ -807,6 +913,8 @@ public partial class PlanetPlayer : CustomRigidBody
 		jumpBufferTimer = 0f;
 		GlobalPosition += upAxis * jumpTakeoffDistance;
 		body?.SuppressGrounding(jumpGroundingLockTime);
+		RuntimeLog.Info(RuntimeLogChannel.Player,
+			$"Jump executed. VerticalSpeed={verticalSpeed:0.00}, TakeoffDistance={jumpTakeoffDistance:0.00}, Position={RuntimeLog.FormatVector(GlobalPosition)}, UpAxis={RuntimeLog.FormatVector(upAxis)}");
 	}
 
 	private Vector2 ReadLookInput()
@@ -814,11 +922,6 @@ public partial class PlanetPlayer : CustomRigidBody
 		Vector2 value = lookInput;
 		lookInput = Vector2.Zero;
 		return value;
-	}
-
-	private bool WasJumpPressedThisFrame()
-	{
-		return jumpPressedThisFrame || Input.IsActionJustPressed("jump");
 	}
 
 	private bool WasEscapePressedThisFrame()
@@ -979,13 +1082,19 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	private void ClearFrameInput()
 	{
-		jumpPressedThisFrame = false;
 		escapePressedThisFrame = false;
 		primaryPointerPressedThisFrame = false;
 		secondaryPointerPressedThisFrame = false;
 		digit1PressedThisFrame = false;
 		digit2PressedThisFrame = false;
 		digit3PressedThisFrame = false;
+	}
+
+	private bool ConsumeJumpPress()
+	{
+		bool pressed = jumpQueued || Input.IsActionJustPressed("jump");
+		jumpQueued = false;
+		return pressed;
 	}
 
 	private static void EnsureInputActions()

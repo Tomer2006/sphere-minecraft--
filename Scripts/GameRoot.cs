@@ -11,17 +11,30 @@ public partial class GameRoot : SceneLighting
 
     private PlanetVoxelWorld? world;
     private PlanetPlayer? player;
+    private CanvasLayer? loadingLayer;
+    private Label? loadingTitleLabel;
+    private ProgressBar? loadingProgressBar;
+    private Label? loadingStatusLabel;
     private CanvasLayer? pauseMenuLayer;
     private PanelContainer? pauseMenuPanel;
     private Label? saveStatusLabel;
     private bool pauseMenuVisible;
+    private bool loadingScreenVisible;
+    private bool pendingPostLoadPlayerPlacement;
 
     public override void _Ready()
     {
         base._Ready();
         ProcessMode = ProcessModeEnum.Always;
+        RuntimeLog.Info(RuntimeLogChannel.Session, $"GameRoot ready. WorldPath={WorldPath}, PlayerPath={PlayerPath}");
+        BuildLoadingScreen();
         BuildPauseMenu();
         CallDeferred(nameof(InitializeSession));
+    }
+
+    public override void _Process(double delta)
+    {
+        UpdateLoadingScreen();
     }
 
     public override void _Input(InputEvent @event)
@@ -31,8 +44,14 @@ public partial class GameRoot : SceneLighting
             return;
         }
 
+        if (loadingScreenVisible)
+        {
+            return;
+        }
+
         if (keyEvent.Keycode == Key.Escape)
         {
+            RuntimeLog.Info(RuntimeLogChannel.Session, "Escape pressed. Toggling pause menu.");
             TogglePauseMenu();
             GetViewport().SetInputAsHandled();
             return;
@@ -40,6 +59,7 @@ public partial class GameRoot : SceneLighting
 
         if (keyEvent.Keycode == Key.F5)
         {
+            RuntimeLog.Info(RuntimeLogChannel.Save, "F5 pressed. Saving current game.");
             SaveCurrentGame("Game saved.");
             GetViewport().SetInputAsHandled();
         }
@@ -49,25 +69,33 @@ public partial class GameRoot : SceneLighting
     {
         if (what == NotificationWMCloseRequest)
         {
+            RuntimeLog.Info(RuntimeLogChannel.Session, "Window close requested. Attempting autosave.");
             SaveCurrentGame();
         }
     }
 
     private void InitializeSession()
     {
+        RuntimeLog.Info(RuntimeLogChannel.Session, "Initializing gameplay session.");
         world = GetNodeOrNull<PlanetVoxelWorld>(WorldPath);
         player = GetNodeOrNull<PlanetPlayer>(PlayerPath);
 
         if (world is null || player is null)
         {
-            GD.PushError("GameRoot could not find the world or player.");
+            RuntimeLog.Error(RuntimeLogChannel.Session, "GameRoot could not find the world or player.");
             return;
         }
+
+        player.SetGameplayEnabled(false);
+        pendingPostLoadPlayerPlacement = true;
+        SetLoadingScreenVisible(true);
 
         if (!string.IsNullOrWhiteSpace(SaveGameManager.PendingLoadSlotId) &&
             SaveGameManager.TryLoadGame(SaveGameManager.PendingLoadSlotId!, out SaveGameData? saveData) &&
             saveData is not null)
         {
+            RuntimeLog.Info(RuntimeLogChannel.Session,
+                $"Loading existing save. Slot={saveData.SlotId}, Name={saveData.SaveName}, SavedAtUtc={saveData.SavedAtUtc}");
             SaveGameManager.CurrentSlotId = saveData.SlotId;
             SaveGameManager.CurrentSaveName = saveData.SaveName;
             world.LoadFromSave(saveData.World);
@@ -78,6 +106,8 @@ public partial class GameRoot : SceneLighting
         {
             NewGameOptions options = SaveGameManager.ConsumePendingNewGame() ?? NewGameOptions.CreateDefault();
             SaveGameManager.CurrentSaveName = string.IsNullOrWhiteSpace(options.SaveName) ? "New World" : options.SaveName;
+            RuntimeLog.Info(RuntimeLogChannel.Session,
+                $"Starting new world. Name={SaveGameManager.CurrentSaveName}, Seed={options.WorldSeed}, BaseRadius={options.BaseRadiusInBlocks}, HeightVariation={options.HeightVariationInBlocks:0.00}");
 
             world.BaseRadiusInBlocks = options.BaseRadiusInBlocks;
             world.HeightVariationInBlocks = options.HeightVariationInBlocks;
@@ -93,6 +123,80 @@ public partial class GameRoot : SceneLighting
 
         SaveGameManager.PendingLoadSlotId = null;
         SetPauseMenuVisible(false);
+        UpdateLoadingScreen();
+    }
+
+    private void BuildLoadingScreen()
+    {
+        loadingLayer = new CanvasLayer
+        {
+            Name = "LoadingScreen",
+            Visible = true,
+            ProcessMode = ProcessModeEnum.Always
+        };
+        AddChild(loadingLayer);
+
+        ColorRect dim = new()
+        {
+            Name = "LoadingDim",
+            Color = new Color(0.03f, 0.05f, 0.08f, 1f),
+            AnchorRight = 1f,
+            AnchorBottom = 1f,
+            MouseFilter = Control.MouseFilterEnum.Stop
+        };
+        loadingLayer.AddChild(dim);
+
+        PanelContainer panel = new()
+        {
+            Name = "LoadingPanel",
+            CustomMinimumSize = new Vector2(420f, 0f),
+            AnchorLeft = 0.5f,
+            AnchorTop = 0.5f,
+            AnchorRight = 0.5f,
+            AnchorBottom = 0.5f,
+            OffsetLeft = -210f,
+            OffsetTop = -90f,
+            OffsetRight = 210f,
+            OffsetBottom = 90f,
+            MouseFilter = Control.MouseFilterEnum.Stop
+        };
+        loadingLayer.AddChild(panel);
+
+        MarginContainer margin = new();
+        margin.AddThemeConstantOverride("margin_left", 24);
+        margin.AddThemeConstantOverride("margin_top", 24);
+        margin.AddThemeConstantOverride("margin_right", 24);
+        margin.AddThemeConstantOverride("margin_bottom", 24);
+        panel.AddChild(margin);
+
+        VBoxContainer layout = new();
+        layout.AddThemeConstantOverride("separation", 12);
+        margin.AddChild(layout);
+
+        loadingTitleLabel = new Label
+        {
+            Text = "Loading Planet",
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        layout.AddChild(loadingTitleLabel);
+
+        loadingStatusLabel = new Label
+        {
+            Text = "Preparing world...",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart
+        };
+        layout.AddChild(loadingStatusLabel);
+
+        loadingProgressBar = new ProgressBar
+        {
+            MinValue = 0,
+            MaxValue = 100,
+            Value = 0,
+            ShowPercentage = false,
+            CustomMinimumSize = new Vector2(360f, 20f)
+        };
+        layout.AddChild(loadingProgressBar);
     }
 
     private void BuildPauseMenu()
@@ -189,7 +293,13 @@ public partial class GameRoot : SceneLighting
 
     private void SetPauseMenuVisible(bool visible)
     {
+        if (loadingScreenVisible && visible)
+        {
+            return;
+        }
+
         pauseMenuVisible = visible;
+        RuntimeLog.Info(RuntimeLogChannel.Session, $"Pause menu visibility changed. Visible={visible}");
 
         if (pauseMenuLayer != null)
         {
@@ -200,19 +310,82 @@ public partial class GameRoot : SceneLighting
         Input.MouseMode = visible ? Input.MouseModeEnum.Visible : Input.MouseModeEnum.Captured;
     }
 
+    private void UpdateLoadingScreen()
+    {
+        if (world == null)
+        {
+            return;
+        }
+
+        bool isLoading = world.IsInitialChunkLoadInProgress;
+        SetLoadingScreenVisible(isLoading);
+
+        if (loadingProgressBar != null)
+        {
+            loadingProgressBar.Value = world.InitialChunkLoadProgress * 100f;
+        }
+
+        if (loadingStatusLabel != null)
+        {
+            int total = world.InitialChunkLoadTotalCount;
+            int complete = world.InitialChunkLoadCompletedCount;
+            loadingStatusLabel.Text = total <= 0
+                ? "Preparing world..."
+                : $"Building planet chunks {complete}/{total}";
+        }
+
+        if (player != null)
+        {
+            if (!isLoading && pendingPostLoadPlayerPlacement)
+            {
+                player.PlaceOnPlanetSurfaceTop();
+                pendingPostLoadPlayerPlacement = false;
+            }
+
+            player.SetGameplayEnabled(!isLoading);
+        }
+
+        if (!isLoading && !pauseMenuVisible)
+        {
+            Input.MouseMode = Input.MouseModeEnum.Captured;
+        }
+    }
+
+    private void SetLoadingScreenVisible(bool visible)
+    {
+        loadingScreenVisible = visible;
+        if (loadingLayer != null)
+        {
+            loadingLayer.Visible = visible;
+        }
+
+        if (visible)
+        {
+            Input.MouseMode = Input.MouseModeEnum.Visible;
+        }
+    }
+
     private bool SaveCurrentGame(string? statusMessage = null, bool forceNewSlot = false)
     {
         if (world is null || player is null)
         {
+            RuntimeLog.Warning(RuntimeLogChannel.Save, "Save requested before world/player were ready.");
             return false;
         }
 
+        RuntimeLog.Info(RuntimeLogChannel.Save,
+            $"Saving game. ForceNewSlot={forceNewSlot}, CurrentSlot={SaveGameManager.CurrentSlotId ?? "<none>"}, SaveName={SaveGameManager.CurrentSaveName ?? "<unnamed>"}");
         bool saved = SaveGameManager.TrySaveGame(new SaveGameData
         {
             SaveName = SaveGameManager.CurrentSaveName ?? "",
             World = world.CreateSaveData(),
             Player = player.CreateSaveData()
         }, out string slotId, forceNewSlot);
+
+        RuntimeLog.Info(RuntimeLogChannel.Save,
+            saved
+                ? $"Save completed. Slot={slotId}, SaveName={SaveGameManager.CurrentSaveName ?? "<unnamed>"}"
+                : "Save failed.");
 
         UpdateSaveStatus(saved
             ? (statusMessage ?? "Game saved.") + " [" + slotId + "]"
@@ -223,6 +396,7 @@ public partial class GameRoot : SceneLighting
 
     private void SaveAndQuitToMenu()
     {
+        RuntimeLog.Info(RuntimeLogChannel.Session, "Save-and-quit to menu requested.");
         SaveCurrentGame("Game saved.");
         SaveGameManager.PendingLoadSlotId = null;
         GetTree().Paused = false;
@@ -231,6 +405,7 @@ public partial class GameRoot : SceneLighting
 
     private void QuitDesktop()
     {
+        RuntimeLog.Info(RuntimeLogChannel.Session, "Quit desktop requested.");
         SaveCurrentGame("Game saved.");
         GetTree().Paused = false;
         GetTree().Quit();
