@@ -11,6 +11,8 @@ ambient_light_color = Color(0.75, 0.82, 0.92, 1)
 ambient_light_energy = 0.6
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_8gbba"]
+radius = 0.45
+height = 1.85
 
 [node name="Main" type="Node3D" unique_id=2033084935]
 script = ExtResource("3_5q8sr")
@@ -33,11 +35,14 @@ shadow_bias = 0.05
 shadow_normal_bias = 1.0
 
 [node name="Player" type="CharacterBody3D" parent="." unique_id=2124311118]
+collision_layer = 2
+input_ray_pickable = false
 slide_on_ceiling = false
 script = ExtResource("2_hpj0g")
 SpawnHeightOffset = 4.0
 GroundMinDot = 0.3
 MaxDepenetrationIterations = 2
+CollisionLayerBits = 2
 CollisionMaskBits = 1
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=1353951316]

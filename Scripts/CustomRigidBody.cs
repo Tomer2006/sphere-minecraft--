@@ -96,7 +96,7 @@ public partial class CustomRigidBody : CharacterBody3D
 			$"Configured capsule. Radius={radius:0.00}, Height={height:0.00}, Center={RuntimeLog.FormatVector(center)}");
 	}
 
-	public void MoveRotation(Quaternion targetRotation, Vector3 upAxis)
+	public void MoveRotation(Quaternion targetRotation)
 	{
 		Quaternion currentRotation = GlobalBasis.GetRotationQuaternion();
 		float angleDelta = currentRotation.AngleTo(targetRotation);
@@ -143,20 +143,7 @@ public partial class CustomRigidBody : CharacterBody3D
 			return;
 		}
 
-		IsGrounded = ProbeGround(upAxis, groundProbeDistance);
-	}
-
-	public bool CanStartGroundJump(Vector3 upAxis, float groundProbeDistance, float extraProbeDistance = 0f)
-	{
-		if (IsGroundingSuppressed)
-		{
-			return false;
-		}
-
-		Vector3 normalizedUp = upAxis.Normalized();
-		float probeDistance = Mathf.Max(0f, groundProbeDistance) + Mathf.Max(0f, extraProbeDistance);
-		return TryProbeGround(normalizedUp, probeDistance, out _, out Vector3 groundNormal) &&
-			   groundNormal.Dot(normalizedUp) >= minGroundDot;
+		IsGrounded = TryProbeGround(upAxis, groundProbeDistance, out _, out _);
 	}
 
 	public void Simulate(Vector3 upAxis, float deltaTime, float groundProbeDistance)
@@ -164,7 +151,7 @@ public partial class CustomRigidBody : CharacterBody3D
 		Vector3 normalizedUp = upAxis.Normalized();
 
 		// Chunk collision can appear under the player a frame later, so clear any overlap before sweeping.
-		ResolvePenetration(normalizedUp);
+		ResolvePenetration();
 		MoveWithCollisions(Velocity * deltaTime, normalizedUp);
 
 		if (IsGroundingSuppressed)
@@ -190,8 +177,8 @@ public partial class CustomRigidBody : CharacterBody3D
 		{
 			RuntimeLog.Info(RuntimeLogChannel.Physics,
 				$"Snapping body to ground. Gap={groundGap:0.000}, ProbeDistance={groundProbeDistance:0.000}, PositionBefore={RuntimeLog.FormatVector(GlobalPosition)}");
-			GlobalPosition -= normalizedUp * Mathf.Min(groundGap, groundProbeDistance);
-			ResolvePenetration(normalizedUp);
+			SnapToGround(normalizedUp, groundGap, groundProbeDistance);
+			ResolvePenetration();
 		}
 
 		Velocity = Velocity.Slide(groundNormal);
@@ -199,10 +186,9 @@ public partial class CustomRigidBody : CharacterBody3D
 
 	private void MoveWithCollisions(Vector3 motion, Vector3 upAxis)
 	{
-		Transform3D bodyTransform = GlobalTransform;
 		Vector3 remainingMotion = motion;
 		Vector3 velocity = Velocity;
-		float currentSkinWidth = GetLocalSkinWidth(upAxis);
+		float currentSkinWidth = GetLocalSkinWidth();
 
 		for (int iteration = 0; iteration < maxSlideIterations; iteration++)
 		{
@@ -213,21 +199,18 @@ public partial class CustomRigidBody : CharacterBody3D
 				break;
 			}
 
-			PhysicsTestMotionResult3D result = new();
-			if (!TryBodyMotion(bodyTransform, remainingMotion, currentSkinWidth, false, 1, result))
+			KinematicCollision3D? collision = MoveAndCollide(remainingMotion, false, currentSkinWidth);
+			if (collision is null)
 			{
-				bodyTransform.Origin += remainingMotion;
 				break;
 			}
 
-			bodyTransform.Origin += result.GetTravel();
-
-			Vector3 normal = result.GetCollisionNormal(0);
-			Vector3 remainder = result.GetRemainder();
+			Vector3 normal = collision.GetNormal();
+			Vector3 remainder = collision.GetRemainder();
 			remainingMotion = remainder.Slide(normal);
 			velocity = velocity.Slide(normal);
 			RuntimeLog.InfoEverySeconds(RuntimeLogChannel.Physics, $"collision-{GetInstanceId()}", 0.15,
-				() => $"Body sweep hit. Iteration={iteration}, Normal={RuntimeLog.FormatVector(normal)}, Travel={RuntimeLog.FormatVector(result.GetTravel())}, Remainder={RuntimeLog.FormatVector(remainder)}");
+				() => $"Body sweep hit. Iteration={iteration}, Normal={RuntimeLog.FormatVector(normal)}, Travel={RuntimeLog.FormatVector(collision.GetTravel())}, Remainder={RuntimeLog.FormatVector(remainder)}");
 
 			if (!IsGroundingSuppressed &&
 				normal.Dot(upAxis) >= minGroundDot &&
@@ -237,19 +220,13 @@ public partial class CustomRigidBody : CharacterBody3D
 			}
 		}
 
-		GlobalTransform = bodyTransform;
 		Velocity = velocity;
 	}
 
-	private bool ProbeGround(Vector3 upAxis, float groundProbeDistance)
-	{
-		return TryProbeGround(upAxis, groundProbeDistance, out _, out _);
-	}
-
-	private bool TryProbeGround(Vector3 upAxis, float groundProbeDistance, out float groundGap, out Vector3 groundNormal)
+	protected bool TryProbeGround(Vector3 upAxis, float groundProbeDistance, out float groundGap, out Vector3 groundNormal)
 	{
 		Vector3 normalizedUp = upAxis.Normalized();
-		float currentSkinWidth = GetLocalSkinWidth(normalizedUp);
+		float currentSkinWidth = GetLocalSkinWidth();
 		float radius = GetScaledRadius();
 		Vector3 bottomSphereCenter = GetBottomSphereCenter(GlobalTransform, normalizedUp);
 		Vector3 bottomPoint = bottomSphereCenter - normalizedUp * radius;
@@ -345,10 +322,9 @@ public partial class CustomRigidBody : CharacterBody3D
 		tangentB = upAxis.Cross(tangentA).Normalized();
 	}
 
-	private void ResolvePenetration(Vector3 upAxis)
+	private void ResolvePenetration()
 	{
-		float currentSkinWidth = GetLocalSkinWidth(upAxis);
-		Vector3 normalizedUp = upAxis.LengthSquared() > 0.0001f ? upAxis.Normalized() : Vector3.Up;
+		float currentSkinWidth = GetLocalSkinWidth();
 
 		for (int iteration = 0; iteration < maxDepenetrationIterations; iteration++)
 		{
@@ -360,27 +336,16 @@ public partial class CustomRigidBody : CharacterBody3D
 
 			float deepestDepth = 0f;
 			Vector3 deepestNormal = Vector3.Zero;
-			Vector3 accumulatedSeparation = Vector3.Zero;
-			float upwardSupport = 0f;
 			for (int i = 0; i < result.GetCollisionCount(); i++)
 			{
 				float depth = result.GetCollisionDepth(i);
-				Vector3 normal = result.GetCollisionNormal(i);
-				if (depth <= 0.000001f || normal.LengthSquared() <= 0.000001f)
-				{
-					continue;
-				}
-
-				accumulatedSeparation += normal * depth;
-				upwardSupport = Mathf.Max(upwardSupport, depth * Mathf.Max(0f, normal.Dot(normalizedUp)));
-
 				if (depth <= deepestDepth)
 				{
 					continue;
 				}
 
 				deepestDepth = depth;
-				deepestNormal = normal;
+				deepestNormal = result.GetCollisionNormal(i);
 			}
 
 			if (deepestDepth <= 0.000001f || deepestNormal.LengthSquared() <= 0.000001f)
@@ -388,24 +353,43 @@ public partial class CustomRigidBody : CharacterBody3D
 				break;
 			}
 
-			Vector3 separation = accumulatedSeparation;
-			if (separation.LengthSquared() <= 0.000001f)
-			{
-				separation = deepestNormal * deepestDepth;
-			}
-			else if (separation.Dot(normalizedUp) < upwardSupport * 0.35f)
-			{
-				// When wedged between several blocks, bias the recovery away from the planet so we do not get shoved inward.
-				separation += normalizedUp * upwardSupport;
-			}
-
-			float separationDistance = Mathf.Max(deepestDepth, separation.Length());
-			Vector3 separationDirection = separation.Normalized();
-
 			RuntimeLog.Info(RuntimeLogChannel.Physics,
-				$"Resolving penetration. Iteration={iteration}, Depth={deepestDepth:0.0000}, Normal={RuntimeLog.FormatVector(deepestNormal)}, Separation={RuntimeLog.FormatVector(separationDirection)}, CollisionCount={result.GetCollisionCount()}");
-			GlobalPosition += separationDirection * (separationDistance + currentSkinWidth);
+				$"Resolving penetration. Iteration={iteration}, Depth={deepestDepth:0.0000}, Normal={RuntimeLog.FormatVector(deepestNormal)}");
+			Vector3 recoveryMotion = deepestNormal.Normalized() * (deepestDepth + currentSkinWidth);
+			KinematicCollision3D? recoveryCollision = MoveAndCollide(recoveryMotion, false, currentSkinWidth);
+			if (recoveryCollision is not null && recoveryCollision.GetTravel().LengthSquared() <= 0.000001f)
+			{
+				break;
+			}
 		}
+	}
+
+	private void SnapToGround(Vector3 upAxis, float groundGap, float groundProbeDistance)
+	{
+		float snapDistance = Mathf.Min(groundGap, groundProbeDistance);
+		if (snapDistance <= 0f)
+		{
+			return;
+		}
+
+		float currentSkinWidth = GetLocalSkinWidth();
+		MoveAndCollide(-upAxis * snapDistance, false, currentSkinWidth);
+	}
+
+	protected void MoveWithCollision(Vector3 motion)
+	{
+		if (motion.LengthSquared() <= 0.000001f)
+		{
+			return;
+		}
+
+		MoveAndCollide(motion, false, GetLocalSkinWidth());
+	}
+
+	protected void MoveToPositionWithCollision(Vector3 targetPosition)
+	{
+		MoveWithCollision(targetPosition - GlobalPosition);
+		ResolvePenetration();
 	}
 
 	private bool TryBodyMotion(
@@ -482,13 +466,13 @@ public partial class CustomRigidBody : CharacterBody3D
 		return GetCapsuleHeight() * Mathf.Abs(GlobalTransform.Basis.Scale.Y);
 	}
 
-	private float GetLocalSkinWidth(Vector3 upAxis)
+	private float GetLocalSkinWidth()
 	{
 		float radius = GetScaledRadius();
 		return Mathf.Clamp(skinWidth, 0.001f, Mathf.Max(0.02f, radius * 0.12f));
 	}
 
-	private bool IsGroundingSuppressed => groundingSuppressionTimer > 0f;
+	protected bool IsGroundingSuppressed => groundingSuppressionTimer > 0f;
 
 	private void EnsureCapsule()
 	{

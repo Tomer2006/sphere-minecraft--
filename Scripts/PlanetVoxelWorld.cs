@@ -786,7 +786,12 @@ public partial class PlanetVoxelWorld : Node3D
 		MeshInstance3D meshInstance = new() { Name = "Mesh" };
 		root.AddChild(meshInstance);
 
-		StaticBody3D collisionBody = new() { Name = "Collider" };
+		StaticBody3D collisionBody = new()
+		{
+			Name = "Collider",
+			CollisionLayer = 1,
+			CollisionMask = 2
+		};
 		root.AddChild(collisionBody);
 
 		CollisionShape3D collisionShape = new() { Name = "CollisionShape3D" };

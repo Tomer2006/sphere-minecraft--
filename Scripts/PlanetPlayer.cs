@@ -19,7 +19,6 @@ public partial class PlanetPlayer : CustomRigidBody
 	private float airControl = 0.35f;
 	private float gravityStrength = 30f;
 	private float jumpSpeed = 11f;
-	private float groundedStickSpeed = 0.2f;
 	private float groundProbeDistance = 0.08f;
 	private float groundMinDot = 0.35f;
 	private float coyoteTime = 0.12f;
@@ -36,7 +35,6 @@ public partial class PlanetPlayer : CustomRigidBody
 	private float interactDistance = 8f;
 	private VoxelBlockType selectedBlock = VoxelBlockType.Grass;
 
-	private CustomRigidBody? body;
 	private Node3D? cameraPivot;
 	private Vector2 moveInput;
 	private Vector3 desiredForward = Vector3.Forward;
@@ -141,13 +139,6 @@ public partial class PlanetPlayer : CustomRigidBody
 	}
 
 	[Export]
-	public float GroundedStickSpeed
-	{
-		get => groundedStickSpeed;
-		set => groundedStickSpeed = value;
-	}
-
-	[Export]
 	public float GroundProbeDistance
 	{
 		get => groundProbeDistance;
@@ -241,10 +232,6 @@ public partial class PlanetPlayer : CustomRigidBody
 		set => selectedBlock = value;
 	}
 
-	public VoxelBlockType SelectedBlock => selectedBlock;
-
-	public bool GameplayEnabled => gameplayEnabled;
-
 	public void SetGameplayEnabled(bool enabled)
 	{
 		gameplayEnabled = enabled;
@@ -262,86 +249,21 @@ public partial class PlanetPlayer : CustomRigidBody
 			return;
 		}
 
-		GlobalPosition = world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset);
+		MoveToPositionWithCollision(world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset));
 		Velocity = Vector3.Zero;
 
 		Vector3 upAxis = GetUpAxis();
 		smoothedUp = upAxis;
-		desiredForward = desiredForward.Slide(upAxis).Normalized();
-
-		if (desiredForward.LengthSquared() < 0.001f)
-		{
-			desiredForward = Vector3.Forward.Slide(upAxis).Normalized();
-		}
-
-		if (desiredForward.LengthSquared() < 0.001f)
-		{
-			desiredForward = Vector3.Right.Slide(upAxis).Normalized();
-		}
+		NormalizeDesiredForward(upAxis);
 
 		AlignToSurface(upAxis, true);
 		RuntimeLog.Info(RuntimeLogChannel.Player,
 			$"Placed player on top of planet. Position={RuntimeLog.FormatVector(GlobalPosition)}, ApproxSurfaceRadius={world.ApproximateSurfaceRadius:0.00}, UpAxis={RuntimeLog.FormatVector(upAxis)}");
 	}
 
-	public PlayerSaveData CreateSaveData()
-	{
-		return new PlayerSaveData
-		{
-			Position = Vector3Save.FromVector3(GlobalPosition),
-			Velocity = Vector3Save.FromVector3(Velocity),
-			DesiredForward = Vector3Save.FromVector3(desiredForward),
-			Pitch = pitch,
-			SelectedBlockType = (int)selectedBlock
-		};
-	}
-
-	public void ApplySaveData(PlayerSaveData data)
-	{
-		body = this;
-
-		if (world == null)
-		{
-			world = ResolveWorld();
-		}
-
-		AttachOrCreateCamera();
-
-		GlobalPosition = data.Position.ToVector3();
-		Velocity = data.Velocity.ToVector3();
-		desiredForward = data.DesiredForward.ToVector3();
-		pitch = data.Pitch;
-		selectedBlock = (VoxelBlockType)data.SelectedBlockType;
-
-		Vector3 upAxis = GetUpAxis();
-		smoothedUp = upAxis;
-		desiredForward = desiredForward.Slide(upAxis).Normalized();
-
-		if (desiredForward.LengthSquared() < 0.001f)
-		{
-			desiredForward = Vector3.Forward.Slide(upAxis).Normalized();
-		}
-
-		if (desiredForward.LengthSquared() < 0.001f)
-		{
-			desiredForward = Vector3.Right.Slide(upAxis).Normalized();
-		}
-
-		if (cameraPivot != null)
-		{
-			cameraPivot.RotationDegrees = new Vector3(pitch, 0f, 0f);
-		}
-
-		AlignToSurface(upAxis, true);
-		world?.RefreshStreamingAroundPlayer();
-		RuntimeLog.Info(RuntimeLogChannel.Player,
-			$"Applied player save data. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(Velocity)}, Pitch={pitch:0.00}, SelectedBlock={selectedBlock}");
-	}
-
 	public override void _Ready()
 	{
 		EnsureInputActions();
-		body = this;
 		ApplyBodySettings();
 		AttachOrCreateCamera();
 		EnsureHud();
@@ -416,8 +338,6 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	private void Start()
 	{
-		body = this;
-
 		if (world == null)
 		{
 			world = ResolveWorld();
@@ -431,7 +351,7 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		AttachOrCreateCamera();
 
-		GlobalPosition = world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset);
+		MoveToPositionWithCollision(world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset));
 		Velocity = Vector3.Zero;
 
 		Vector3 upAxis = GetUpAxis();
@@ -450,9 +370,82 @@ public partial class PlanetPlayer : CustomRigidBody
 			$"Player start complete. SpawnPosition={RuntimeLog.FormatVector(GlobalPosition)}, ApproxSurfaceRadius={world.ApproximateSurfaceRadius:0.00}, UpAxis={RuntimeLog.FormatVector(upAxis)}");
 	}
 
+	internal Vector3 DesiredForwardState
+	{
+		get => desiredForward;
+		set => desiredForward = value;
+	}
+
+	internal float PitchDegrees
+	{
+		get => pitch;
+		set => pitch = value;
+	}
+
+	internal Vector3 SmoothedUpState
+	{
+		get => smoothedUp;
+		set => smoothedUp = value;
+	}
+
+	internal VoxelBlockType SelectedBlockState
+	{
+		get => selectedBlock;
+		set => selectedBlock = value;
+	}
+
+	internal void PrepareForLoadedState()
+	{
+		world ??= ResolveWorld();
+		AttachOrCreateCamera();
+	}
+
+	internal Vector3 GetUpAxisForPersistence()
+	{
+		return GetUpAxis();
+	}
+
+	internal void NormalizeDesiredForward(Vector3 upAxis)
+	{
+		desiredForward = desiredForward.Slide(upAxis).Normalized();
+
+		if (desiredForward.LengthSquared() < 0.001f)
+		{
+			desiredForward = Vector3.Forward.Slide(upAxis).Normalized();
+		}
+
+		if (desiredForward.LengthSquared() < 0.001f)
+		{
+			desiredForward = Vector3.Right.Slide(upAxis).Normalized();
+		}
+	}
+
+	internal void ApplyCameraPitch()
+	{
+		if (cameraPivot != null)
+		{
+			cameraPivot.RotationDegrees = new Vector3(pitch, 0f, 0f);
+		}
+	}
+
+	internal void AlignToSurfaceImmediately(Vector3 upAxis)
+	{
+		AlignToSurface(upAxis, true);
+	}
+
+	internal void RefreshStreamingAfterLoad()
+	{
+		world?.RefreshStreamingAroundPlayer();
+	}
+
+	internal void MoveToPositionForPersistence(Vector3 targetPosition)
+	{
+		MoveToPositionWithCollision(targetPosition);
+	}
+
 	private void Update()
 	{
-		if (!gameplayEnabled || world == null || body == null)
+		if (!gameplayEnabled || world == null)
 		{
 			return;
 		}
@@ -470,12 +463,12 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	private void FixedUpdate(float deltaTime)
 	{
-		if (!gameplayEnabled || world == null || body == null)
+		if (!gameplayEnabled || world == null)
 		{
 			return;
 		}
 
-		body.BeginPhysicsStep(deltaTime);
+		BeginPhysicsStep(deltaTime);
 
 		if (ConsumeJumpPress())
 		{
@@ -489,14 +482,14 @@ public partial class PlanetPlayer : CustomRigidBody
 		smoothedUp = smoothedUp.Slerp(rawUp, t).Normalized();
 
 		AlignToSurface(smoothedUp, false);
-		body.RefreshGrounded(smoothedUp, groundProbeDistance);
+		RefreshGrounded(smoothedUp, groundProbeDistance);
 
 		if (jumpBufferTimer > 0f)
 		{
 			jumpBufferTimer = Mathf.Max(0f, jumpBufferTimer - deltaTime);
 		}
 
-		if (body.IsGrounded)
+		if (IsGrounded)
 		{
 			coyoteTimer = coyoteTime;
 		}
@@ -506,15 +499,15 @@ public partial class PlanetPlayer : CustomRigidBody
 		}
 
 		SimulateBody(smoothedUp, deltaTime);
-		if (lastGroundedState != body.IsGrounded)
+		if (lastGroundedState != IsGrounded)
 		{
 			RuntimeLog.Info(RuntimeLogChannel.Player,
-				$"Grounded state changed to {body.IsGrounded}. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(body.Velocity)}, CoyoteTimer={coyoteTimer:0.000}");
-			lastGroundedState = body.IsGrounded;
+				$"Grounded state changed to {IsGrounded}. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(Velocity)}, CoyoteTimer={coyoteTimer:0.000}");
+			lastGroundedState = IsGrounded;
 		}
 
 		RuntimeLog.InfoEverySeconds(RuntimeLogChannel.Player, $"player-state-{GetInstanceId()}", 0.5,
-			() => $"Player state snapshot. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(body.Velocity)}, Grounded={body.IsGrounded}, MoveInput={moveInput}, JumpBuffer={jumpBufferTimer:0.000}, Coyote={coyoteTimer:0.000}");
+			() => $"Player state snapshot. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(Velocity)}, Grounded={IsGrounded}, MoveInput={moveInput}, JumpBuffer={jumpBufferTimer:0.000}, Coyote={coyoteTimer:0.000}");
 	}
 
 	private void AttachOrCreateCamera()
@@ -558,13 +551,8 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	private void ApplyBodySettings()
 	{
-		if (body == null)
-		{
-			return;
-		}
-
-		body.ConfigureCapsule(capsuleRadius, capsuleHeight, capsuleCenter);
-		body.MinGroundDot = groundMinDot;
+		ConfigureCapsule(capsuleRadius, capsuleHeight, capsuleCenter);
+		MinGroundDot = groundMinDot;
 		RuntimeLog.Info(RuntimeLogChannel.Player,
 			$"Applied body settings. CapsuleCenter={RuntimeLog.FormatVector(capsuleCenter)}, GroundMinDot={groundMinDot:0.00}, GroundProbeDistance={groundProbeDistance:0.00}");
 	}
@@ -614,12 +602,7 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	private void SimulateBody(Vector3 upAxis, float deltaTime)
 	{
-		if (body == null)
-		{
-			return;
-		}
-
-		Vector3 velocity = body.Velocity;
+		Vector3 velocity = Velocity;
 		float verticalSpeed = velocity.Dot(upAxis);
 		Vector3 lateralVelocity = velocity.Slide(upAxis);
 
@@ -640,18 +623,18 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		desiredVelocity *= moveSpeed;
 
-		float acceleration = moveAcceleration * (body.IsGrounded ? 1f : airControl);
+		float acceleration = moveAcceleration * (IsGrounded ? 1f : airControl);
 		lateralVelocity = lateralVelocity.MoveToward(desiredVelocity, acceleration * deltaTime);
 
 		float nearGroundProbeBonus = Mathf.Max(0.02f, jumpTakeoffDistance + Mathf.Max(0f, -verticalSpeed) * deltaTime);
 		bool canJumpFromNearGround = jumpBufferTimer > 0f &&
-			!body.IsGrounded &&
+			!IsGrounded &&
 			coyoteTimer <= 0f &&
-			body.CanStartGroundJump(upAxis, groundProbeDistance, nearGroundProbeBonus);
-		bool canJump = jumpBufferTimer > 0f && (body.IsGrounded || coyoteTimer > 0f || canJumpFromNearGround);
+			CanStartGroundJump(upAxis, groundProbeDistance, nearGroundProbeBonus);
+		bool canJump = jumpBufferTimer > 0f && (IsGrounded || coyoteTimer > 0f || canJumpFromNearGround);
 		bool didJump = false;
 
-		if (body.IsGrounded)
+		if (IsGrounded)
 		{
 			if (verticalSpeed < 0f)
 			{
@@ -678,17 +661,30 @@ public partial class PlanetPlayer : CustomRigidBody
 			}
 		}
 
-		body.Velocity = lateralVelocity + upAxis * verticalSpeed;
-		body.Simulate(upAxis, deltaTime, groundProbeDistance);
+		Velocity = lateralVelocity + upAxis * verticalSpeed;
+		Simulate(upAxis, deltaTime, groundProbeDistance);
 
-		if (!didJump && jumpBufferTimer > 0f && body.IsGrounded)
+		if (!didJump && jumpBufferTimer > 0f && IsGrounded)
 		{
-			Vector3 postSimVelocity = body.Velocity;
+			Vector3 postSimVelocity = Velocity;
 			Vector3 postSimLateralVelocity = postSimVelocity.Slide(upAxis);
 			float postSimVerticalSpeed = Mathf.Max(0f, postSimVelocity.Dot(upAxis));
 			ExecuteJump(upAxis, ref postSimVerticalSpeed);
-			body.Velocity = postSimLateralVelocity + upAxis * postSimVerticalSpeed;
+			Velocity = postSimLateralVelocity + upAxis * postSimVerticalSpeed;
 		}
+	}
+
+	private bool CanStartGroundJump(Vector3 upAxis, float groundProbeDistance, float extraProbeDistance = 0f)
+	{
+		if (IsGroundingSuppressed)
+		{
+			return false;
+		}
+
+		Vector3 normalizedUp = upAxis.Normalized();
+		float probeDistance = Mathf.Max(0f, groundProbeDistance) + Mathf.Max(0f, extraProbeDistance);
+		return TryProbeGround(normalizedUp, probeDistance, out _, out Vector3 groundNormal) &&
+			   groundNormal.Dot(normalizedUp) >= MinGroundDot;
 	}
 
 	private void AlignToSurface(Vector3 upAxis, bool immediate)
@@ -710,7 +706,7 @@ public partial class PlanetPlayer : CustomRigidBody
 		}
 		else
 		{
-			body?.MoveRotation(targetBasis.GetRotationQuaternion(), upAxis);
+			MoveRotation(targetBasis.GetRotationQuaternion());
 		}
 	}
 
@@ -911,8 +907,8 @@ public partial class PlanetPlayer : CustomRigidBody
 		verticalSpeed = jumpSpeed;
 		coyoteTimer = 0f;
 		jumpBufferTimer = 0f;
-		GlobalPosition += upAxis * jumpTakeoffDistance;
-		body?.SuppressGrounding(jumpGroundingLockTime);
+		MoveWithCollision(upAxis * jumpTakeoffDistance);
+		SuppressGrounding(jumpGroundingLockTime);
 		RuntimeLog.Info(RuntimeLogChannel.Player,
 			$"Jump executed. VerticalSpeed={verticalSpeed:0.00}, TakeoffDistance={jumpTakeoffDistance:0.00}, Position={RuntimeLog.FormatVector(GlobalPosition)}, UpAxis={RuntimeLog.FormatVector(upAxis)}");
 	}
