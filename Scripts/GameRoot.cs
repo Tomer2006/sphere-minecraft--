@@ -2,7 +2,7 @@ using Godot;
 
 namespace SphereMinecraft;
 
-public partial class GameRoot : SceneLighting
+public partial class GameRoot : Node3D
 {
 	private const string MainMenuScenePath = "res://Scenes/main_menu.tscn";
 
@@ -24,7 +24,6 @@ public partial class GameRoot : SceneLighting
 
 	public override void _Ready()
 	{
-		base._Ready();
 		ProcessMode = ProcessModeEnum.Always;
 		RuntimeLog.Info(RuntimeLogChannel.Session, $"GameRoot ready. WorldPath={WorldPath}, PlayerPath={PlayerPath}");
 		BuildLoadingScreen();
@@ -112,10 +111,7 @@ public partial class GameRoot : SceneLighting
 			world.BaseRadiusInBlocks = options.BaseRadiusInBlocks;
 			world.HeightVariationInBlocks = options.HeightVariationInBlocks;
 			world.WorldSeed = options.WorldSeed;
-			world.FaceCoordinateUniformity = options.FaceCoordinateUniformity;
-			world.PolynomialWarpBias = options.PolynomialWarpBias;
 			world.DistortionOptimizedRotationEuler = options.DistortionOptimizedRotationEuler.ToVector3();
-			world.LocalCellDeformation = options.LocalCellDeformation;
 			world.GeneratePlanet();
 
 			UpdateSaveStatus("Created " + SaveGameManager.CurrentSaveName + ". Press F5 to create a save.");
@@ -307,7 +303,9 @@ public partial class GameRoot : SceneLighting
 		}
 
 		GetTree().Paused = visible;
-		Input.MouseMode = visible ? Input.MouseModeEnum.Visible : Input.MouseModeEnum.Captured;
+		Input.MouseMode = visible || player?.IsInventoryOpen == true
+			? Input.MouseModeEnum.Visible
+			: Input.MouseModeEnum.Captured;
 	}
 
 	private void UpdateLoadingScreen()
@@ -347,7 +345,9 @@ public partial class GameRoot : SceneLighting
 
 		if (!isLoading && !pauseMenuVisible)
 		{
-			Input.MouseMode = Input.MouseModeEnum.Captured;
+			Input.MouseMode = player?.IsInventoryOpen == true
+				? Input.MouseModeEnum.Visible
+				: Input.MouseModeEnum.Captured;
 		}
 	}
 

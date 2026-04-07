@@ -1,0 +1,67 @@
+[gd_scene format=3]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_top_color = Color(0.29411766, 0.5882353, 0.9411765, 1)
+sky_horizon_color = Color(0.29411766, 0.5882353, 0.9411765, 1)
+ground_bottom_color = Color(0.29411766, 0.5882353, 0.9411765, 1)
+ground_horizon_color = Color(0.29411766, 0.5882353, 0.9411765, 1)
+
+[sub_resource type="Sky" id="Sky_test"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_test"]
+background_mode = 2
+sky = SubResource("Sky_test")
+ambient_light_source = 2
+ambient_light_color = Color(0.96, 0.92, 0.84, 1)
+ambient_light_sky_contribution = 0.0
+ambient_light_energy = 0.0
+reflected_light_source = 1
+tonemap_mode = 3
+tonemap_exposure = 1.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_cube"]
+size = Vector3(2, 2, 2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ground"]
+size = Vector3(24, 0.5, 24)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_cube"]
+albedo_color = Color(0.7, 0.72, 0.76, 1)
+roughness = 1.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.22, 0.24, 0.28, 1)
+roughness = 1.0
+
+[node name="LightingTest" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_test")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-40, 55, 0)
+light_color = Color(1, 0.95, 0.86, 1)
+light_energy = 2.0
+light_indirect_energy = 1.2
+shadow_enabled = true
+shadow_bias = 0.005
+shadow_normal_bias = 0.05
+directional_shadow_mode = 1
+directional_shadow_blend_splits = true
+sky_mode = 1
+
+[node name="Camera3D" type="Camera3D" parent="."]
+position = Vector3(6, 4.5, 9)
+rotation_degrees = Vector3(-18, 28, 0)
+current = true
+
+[node name="Cube" type="MeshInstance3D" parent="."]
+position = Vector3(0, 1, 0)
+mesh = SubResource("BoxMesh_cube")
+material_override = SubResource("StandardMaterial3D_cube")
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+position = Vector3(0, -0.25, 0)
+mesh = SubResource("BoxMesh_ground")
+material_override = SubResource("StandardMaterial3D_ground")

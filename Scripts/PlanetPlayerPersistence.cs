@@ -12,7 +12,9 @@ public static class PlanetPlayerPersistence
 			Velocity = Vector3Save.FromVector3(player.Velocity),
 			DesiredForward = Vector3Save.FromVector3(player.DesiredForwardState),
 			Pitch = player.PitchDegrees,
-			SelectedBlockType = (int)player.SelectedBlockState
+			SelectedBlockType = (int)player.SelectedHotbarBlockState,
+			SelectedHotbarSlot = player.SelectedHotbarSlotState,
+			InventorySlots = player.CreateInventorySlotSaveData()
 		};
 	}
 
@@ -24,7 +26,7 @@ public static class PlanetPlayerPersistence
 		player.Velocity = data.Velocity.ToVector3();
 		player.DesiredForwardState = data.DesiredForward.ToVector3();
 		player.PitchDegrees = data.Pitch;
-		player.SelectedBlockState = (VoxelBlockType)data.SelectedBlockType;
+		player.ApplyInventorySaveData(data.InventorySlots, data.SelectedHotbarSlot);
 
 		Vector3 upAxis = player.GetUpAxisForPersistence();
 		player.SmoothedUpState = upAxis;
@@ -34,6 +36,6 @@ public static class PlanetPlayerPersistence
 		player.RefreshStreamingAfterLoad();
 
 		RuntimeLog.Info(RuntimeLogChannel.Player,
-			$"Applied player save data. Position={RuntimeLog.FormatVector(player.GlobalPosition)}, Velocity={RuntimeLog.FormatVector(player.Velocity)}, Pitch={player.PitchDegrees:0.00}, SelectedBlock={player.SelectedBlockState}");
+			$"Applied player save data. Position={RuntimeLog.FormatVector(player.GlobalPosition)}, Velocity={RuntimeLog.FormatVector(player.Velocity)}, Pitch={player.PitchDegrees:0.00}, SelectedBlock={player.SelectedHotbarBlockState}, SelectedHotbarSlot={player.SelectedHotbarSlotState}");
 	}
 }

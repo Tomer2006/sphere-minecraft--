@@ -413,7 +413,7 @@ public partial class MainMenu : Control
 
 		Label mappingLabel = new()
 		{
-			Text = "Pure Adjusted Spherical Cube (ASC)",
+			Text = "Pure Adjusted Spherical Cube (ASC): standard cube-to-sphere projection on each face.",
 			AutowrapMode = TextServer.AutowrapMode.WordSmart
 		};
 		mappingLabel.AddThemeColorOverride("font_color", new Color(0.84f, 0.91f, 0.94f, 0.92f));
@@ -735,7 +735,7 @@ public partial class MainMenu : Control
 
 		if (subtitleLabel != null)
 		{
-			subtitleLabel.Text = "Set the world name, planet size, pure ASC sphere mapping, terrain height, and seed.";
+			subtitleLabel.Text = "Set the world name, wrapped cube radius, terrain height, and seed.";
 		}
 
 		SetCreateWorldStatus("");

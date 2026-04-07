@@ -4,11 +4,27 @@
 [ext_resource type="Script" uid="uid://bx1fnwyh6kw2d" path="res://Scripts/PlanetPlayer.cs" id="2_hpj0g"]
 [ext_resource type="Script" uid="uid://dfu1smj8svfmf" path="res://Scripts/GameRoot.cs" id="3_5q8sr"]
 
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_top_color = Color(0.29411766, 0.5882353, 0.9411765, 1)
+sky_horizon_color = Color(0.29411766, 0.5882353, 0.9411765, 1)
+sky_curve = 0.18
+ground_bottom_color = Color(0.29411766, 0.5882353, 0.9411765, 1)
+ground_horizon_color = Color(0.29411766, 0.5882353, 0.9411765, 1)
+ground_curve = 0.08
+
+[sub_resource type="Sky" id="Sky_main"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
 [sub_resource type="Environment" id="Environment_q2ekf"]
 background_mode = 2
+sky = SubResource("Sky_main")
 ambient_light_source = 3
-ambient_light_color = Color(0.75, 0.82, 0.92, 1)
-ambient_light_energy = 0.6
+ambient_light_color = Color(0.96, 0.92, 0.84, 1)
+ambient_light_sky_contribution = 0.42
+ambient_light_energy = 0.48
+reflected_light_source = 1
+tonemap_mode = 3
+tonemap_exposure = 1.0
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_8gbba"]
 radius = 0.45
@@ -22,17 +38,6 @@ environment = SubResource("Environment_q2ekf")
 
 [node name="World" type="Node3D" parent="." unique_id=1281627882]
 script = ExtResource("1_a4wja")
-FaceCoordinateUniformity = 1.0
-PolynomialWarpBias = 1.0
-LocalCellDeformation = 1.0
-
-[node name="Sun" type="DirectionalLight3D" parent="." unique_id=837703078]
-process_mode = 3
-transform = Transform3D(0.8660254, -0.38302222, -0.32139382, 0, 0.64278764, -0.76604444, 0.5, 0.66341394, 0.5566704, 0, 0, 0)
-light_energy = 1.15
-shadow_enabled = true
-shadow_bias = 0.05
-shadow_normal_bias = 1.0
 
 [node name="Player" type="CharacterBody3D" parent="." unique_id=2124311118]
 collision_layer = 2
@@ -40,11 +45,21 @@ input_ray_pickable = false
 slide_on_ceiling = false
 script = ExtResource("2_hpj0g")
 SpawnHeightOffset = 4.0
+CapsuleRadius = 0.25
 GroundMinDot = 0.3
-MaxDepenetrationIterations = 2
-CollisionLayerBits = 2
-CollisionMaskBits = 1
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=1353951316]
 shape = SubResource("CapsuleShape3D_8gbba")
 debug_fill = false
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=437352155]
+transform = Transform3D(0.20035353, -0.9125347, 0.35656542, -0.6710101, 0.13737369, 0.728611, -0.7138655, -0.38523877, -0.58479667, 0, 723.88416, 0)
+light_color = Color(1, 0.95, 0.86, 1)
+light_energy = 2.0
+light_indirect_energy = 1.2
+shadow_enabled = true
+shadow_bias = 0.005
+shadow_normal_bias = 0.05
+directional_shadow_mode = 1
+directional_shadow_blend_splits = true
+sky_mode = 1

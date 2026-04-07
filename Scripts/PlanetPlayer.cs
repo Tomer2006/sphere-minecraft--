@@ -1,9 +1,20 @@
+using System.Collections.Generic;
+using System.Text;
 using Godot;
 
 namespace SphereMinecraft;
 
-public partial class PlanetPlayer : CustomRigidBody
+public partial class PlanetPlayer : CharacterBody3D
 {
+	private const float RotationSharpness = 18f;
+	private const float RotationDeadzoneRadians = 0.0015f;
+	private const float DefaultSafeMargin = 0.04f;
+	private const int HotbarSlotCount = 9;
+	private const int InventoryRowCount = 4;
+	private const int InventorySlotCount = HotbarSlotCount * InventoryRowCount;
+	private const int TotalInventorySlotCount = HotbarSlotCount + InventorySlotCount;
+	private const int MaxInventoryStackSize = 256;
+
 	private NodePath worldPath = new("../World");
 	private PlanetVoxelWorld? world;
 	private Camera3D? playerCamera;
@@ -24,7 +35,6 @@ public partial class PlanetPlayer : CustomRigidBody
 	private float coyoteTime = 0.12f;
 	private float jumpBufferTime = 0.15f;
 	private float jumpGroundingLockTime = 0.18f;
-	private float jumpTakeoffDistance = 0.16f;
 
 	private float mouseSensitivity = 0.14f;
 	private float minPitch = -89f;
@@ -33,30 +43,45 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	private float upSmoothingTime = 0.05f;
 	private float interactDistance = 8f;
-	private VoxelBlockType selectedBlock = VoxelBlockType.Grass;
 
 	private Node3D? cameraPivot;
+	private CollisionShape3D? capsule;
+	private CapsuleShape3D? capsuleShape;
 	private Vector2 moveInput;
+	private readonly VoxelBlockType[] inventoryBlockTypes = new VoxelBlockType[TotalInventorySlotCount];
+	private readonly int[] inventoryBlockCounts = new int[TotalInventorySlotCount];
+	private int selectedHotbarSlot;
 	private Vector3 desiredForward = Vector3.Forward;
 	private float pitch;
 	private float jumpBufferTimer;
+	private float jumpGroundingLockTimer;
 	private float coyoteTimer;
 	private Vector3 smoothedUp = Vector3.Up;
 
-	private Label? selectedBlockLabel;
+	private PanelContainer? inventoryPanel;
+	private GridContainer? inventoryGrid;
+	private HBoxContainer? hotbarContainer;
+	private PanelContainer? carriedItemPanel;
+	private Label? carriedItemLabel;
+	private readonly PanelContainer?[] hotbarSlotPanels = new PanelContainer[HotbarSlotCount];
+	private readonly Label?[] hotbarSlotLabels = new Label[HotbarSlotCount];
+	private readonly PanelContainer?[] inventorySlotPanels = new PanelContainer[InventorySlotCount];
+	private readonly Label?[] inventorySlotLabels = new Label[InventorySlotCount];
 	private ColorRect? crosshairHorizontal;
 	private ColorRect? crosshairVertical;
 
 	private Vector2 lookInput;
 	private bool jumpQueued;
 	private bool escapePressedThisFrame;
+	private bool inventoryTogglePressedThisFrame;
 	private bool primaryPointerPressedThisFrame;
 	private bool secondaryPointerPressedThisFrame;
-	private bool digit1PressedThisFrame;
-	private bool digit2PressedThisFrame;
-	private bool digit3PressedThisFrame;
+	private int pendingHotbarSelection = -1;
 	private bool? lastGroundedState;
 	private bool gameplayEnabled = true;
+	private bool inventoryOpen;
+	private VoxelBlockType carriedBlockType = VoxelBlockType.Air;
+	private int carriedBlockCount;
 
 	[ExportGroup("References")]
 	[Export]
@@ -173,13 +198,6 @@ public partial class PlanetPlayer : CustomRigidBody
 		set => jumpGroundingLockTime = value;
 	}
 
-	[Export]
-	public float JumpTakeoffDistance
-	{
-		get => jumpTakeoffDistance;
-		set => jumpTakeoffDistance = value;
-	}
-
 	[ExportGroup("Look")]
 	[Export]
 	public float MouseSensitivity
@@ -225,21 +243,17 @@ public partial class PlanetPlayer : CustomRigidBody
 		set => interactDistance = value;
 	}
 
-	[Export]
-	public VoxelBlockType SelectedBlockType
-	{
-		get => selectedBlock;
-		set => selectedBlock = value;
-	}
-
 	public void SetGameplayEnabled(bool enabled)
 	{
 		gameplayEnabled = enabled;
 		if (!enabled)
 		{
+			SetInventoryOpen(false);
 			ClearFrameInput();
 		}
 	}
+
+	public bool IsInventoryOpen => inventoryOpen;
 
 	public void PlaceOnPlanetSurfaceTop()
 	{
@@ -249,7 +263,7 @@ public partial class PlanetPlayer : CustomRigidBody
 			return;
 		}
 
-		MoveToPositionWithCollision(world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset));
+		PlacePlayerAt(world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset));
 		Velocity = Vector3.Zero;
 
 		Vector3 upAxis = GetUpAxis();
@@ -263,10 +277,12 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	public override void _Ready()
 	{
+		InitializeCharacterBody();
 		EnsureInputActions();
 		ApplyBodySettings();
 		AttachOrCreateCamera();
 		EnsureHud();
+		SetInventoryOpen(false);
 		RuntimeLog.Info(RuntimeLogChannel.Player,
 			$"PlanetPlayer ready. SpawnHeightOffset={spawnHeightOffset:0.00}, CapsuleRadius={capsuleRadius:0.00}, CapsuleHeight={capsuleHeight:0.00}, MoveSpeed={moveSpeed:0.00}, Gravity={gravityStrength:0.00}");
 		CallDeferred(nameof(Start));
@@ -324,14 +340,35 @@ public partial class PlanetPlayer : CustomRigidBody
 			case Key.Escape:
 				escapePressedThisFrame = true;
 				break;
+			case Key.E:
+				inventoryTogglePressedThisFrame = true;
+				break;
 			case Key.Key1:
-				digit1PressedThisFrame = true;
+				pendingHotbarSelection = 0;
 				break;
 			case Key.Key2:
-				digit2PressedThisFrame = true;
+				pendingHotbarSelection = 1;
 				break;
 			case Key.Key3:
-				digit3PressedThisFrame = true;
+				pendingHotbarSelection = 2;
+				break;
+			case Key.Key4:
+				pendingHotbarSelection = 3;
+				break;
+			case Key.Key5:
+				pendingHotbarSelection = 4;
+				break;
+			case Key.Key6:
+				pendingHotbarSelection = 5;
+				break;
+			case Key.Key7:
+				pendingHotbarSelection = 6;
+				break;
+			case Key.Key8:
+				pendingHotbarSelection = 7;
+				break;
+			case Key.Key9:
+				pendingHotbarSelection = 8;
 				break;
 		}
 	}
@@ -351,7 +388,7 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		AttachOrCreateCamera();
 
-		MoveToPositionWithCollision(world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset));
+		PlacePlayerAt(world.PlanetCenter + Vector3.Up * (world.ApproximateSurfaceRadius + spawnHeightOffset));
 		Velocity = Vector3.Zero;
 
 		Vector3 upAxis = GetUpAxis();
@@ -390,12 +427,21 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	internal VoxelBlockType SelectedBlockState
 	{
-		get => selectedBlock;
-		set => selectedBlock = value;
+		get => SelectedHotbarBlockState;
+		set => SelectOrCreateHotbarBlock(value);
+	}
+
+	internal VoxelBlockType SelectedHotbarBlockState => GetSelectedHotbarBlockType();
+
+	internal int SelectedHotbarSlotState
+	{
+		get => selectedHotbarSlot;
+		set => SelectHotbarSlot(value);
 	}
 
 	internal void PrepareForLoadedState()
 	{
+		EnsureCapsule();
 		world ??= ResolveWorld();
 		AttachOrCreateCamera();
 	}
@@ -440,7 +486,39 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	internal void MoveToPositionForPersistence(Vector3 targetPosition)
 	{
-		MoveToPositionWithCollision(targetPosition);
+		PlacePlayerAt(targetPosition);
+	}
+
+	internal List<PlayerInventorySlotSave> CreateInventorySlotSaveData()
+	{
+		List<PlayerInventorySlotSave> slots = new(TotalInventorySlotCount);
+		for (int slotIndex = 0; slotIndex < TotalInventorySlotCount; slotIndex++)
+		{
+			slots.Add(new PlayerInventorySlotSave
+			{
+				BlockType = (int)inventoryBlockTypes[slotIndex],
+				Count = inventoryBlockCounts[slotIndex]
+			});
+		}
+
+		return slots;
+	}
+
+	internal void ApplyInventorySaveData(IReadOnlyList<PlayerInventorySlotSave>? slots, int hotbarSlotIndex)
+	{
+		ClearInventory();
+
+		if (slots != null)
+		{
+			int slotCount = Mathf.Min(slots.Count, TotalInventorySlotCount);
+			for (int slotIndex = 0; slotIndex < slotCount; slotIndex++)
+			{
+				PlayerInventorySlotSave slot = slots[slotIndex];
+				SetInventorySlot(slotIndex, (VoxelBlockType)slot.BlockType, slot.Count);
+			}
+		}
+
+		SelectHotbarSlot(hotbarSlotIndex);
 	}
 
 	private void Update()
@@ -450,8 +528,14 @@ public partial class PlanetPlayer : CustomRigidBody
 			return;
 		}
 
-		moveInput = ReadMoveInput();
 		HandleCursorLock();
+		HandleHotbarSelection();
+		moveInput = inventoryOpen ? Vector2.Zero : ReadMoveInput();
+
+		if (inventoryOpen)
+		{
+			return;
+		}
 
 		if (Input.MouseMode == Input.MouseModeEnum.Captured)
 		{
@@ -468,7 +552,10 @@ public partial class PlanetPlayer : CustomRigidBody
 			return;
 		}
 
-		BeginPhysicsStep(deltaTime);
+		if (jumpGroundingLockTimer > 0f)
+		{
+			jumpGroundingLockTimer = Mathf.Max(0f, jumpGroundingLockTimer - deltaTime);
+		}
 
 		if (ConsumeJumpPress())
 		{
@@ -481,33 +568,36 @@ public partial class PlanetPlayer : CustomRigidBody
 		float t = 1f - Mathf.Pow(0.001f, deltaTime / smoothingTime);
 		smoothedUp = smoothedUp.Slerp(rawUp, t).Normalized();
 
+		UpdateCharacterBodyState(smoothedUp);
 		AlignToSurface(smoothedUp, false);
-		RefreshGrounded(smoothedUp, groundProbeDistance);
+		bool wasGrounded = IsPlayerGrounded();
 
 		if (jumpBufferTimer > 0f)
 		{
 			jumpBufferTimer = Mathf.Max(0f, jumpBufferTimer - deltaTime);
 		}
 
-		if (IsGrounded)
-		{
-			coyoteTimer = coyoteTime;
-		}
-		else if (coyoteTimer > 0f)
+		if (!wasGrounded && coyoteTimer > 0f)
 		{
 			coyoteTimer = Mathf.Max(0f, coyoteTimer - deltaTime);
 		}
 
-		SimulateBody(smoothedUp, deltaTime);
-		if (lastGroundedState != IsGrounded)
+		SimulateBody(smoothedUp, deltaTime, wasGrounded);
+		bool isGrounded = IsPlayerGrounded();
+		if (isGrounded)
+		{
+			coyoteTimer = coyoteTime;
+		}
+
+		if (lastGroundedState != isGrounded)
 		{
 			RuntimeLog.Info(RuntimeLogChannel.Player,
-				$"Grounded state changed to {IsGrounded}. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(Velocity)}, CoyoteTimer={coyoteTimer:0.000}");
-			lastGroundedState = IsGrounded;
+				$"Grounded state changed to {isGrounded}. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(Velocity)}, CoyoteTimer={coyoteTimer:0.000}");
+			lastGroundedState = isGrounded;
 		}
 
 		RuntimeLog.InfoEverySeconds(RuntimeLogChannel.Player, $"player-state-{GetInstanceId()}", 0.5,
-			() => $"Player state snapshot. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(Velocity)}, Grounded={IsGrounded}, MoveInput={moveInput}, JumpBuffer={jumpBufferTimer:0.000}, Coyote={coyoteTimer:0.000}");
+			() => $"Player state snapshot. Position={RuntimeLog.FormatVector(GlobalPosition)}, Velocity={RuntimeLog.FormatVector(Velocity)}, Grounded={isGrounded}, MoveInput={moveInput}, JumpBuffer={jumpBufferTimer:0.000}, Coyote={coyoteTimer:0.000}");
 	}
 
 	private void AttachOrCreateCamera()
@@ -552,17 +642,94 @@ public partial class PlanetPlayer : CustomRigidBody
 	private void ApplyBodySettings()
 	{
 		ConfigureCapsule(capsuleRadius, capsuleHeight, capsuleCenter);
-		MinGroundDot = groundMinDot;
+		UpdateCharacterBodyState(smoothedUp);
 		RuntimeLog.Info(RuntimeLogChannel.Player,
 			$"Applied body settings. CapsuleCenter={RuntimeLog.FormatVector(capsuleCenter)}, GroundMinDot={groundMinDot:0.00}, GroundProbeDistance={groundProbeDistance:0.00}");
 	}
 
+	private void InitializeCharacterBody()
+	{
+		EnsureCapsule();
+		MotionMode = MotionModeEnum.Grounded;
+		SlideOnCeiling = false;
+		SafeMargin = DefaultSafeMargin;
+		UpDirection = Vector3.Up;
+		UpdateCharacterBodyState(Vector3.Up);
+		RuntimeLog.Info(RuntimeLogChannel.Physics,
+			$"PlanetPlayer body initialized. CollisionLayer={CollisionLayer}, CollisionMask={CollisionMask}, SafeMargin={SafeMargin:0.000}, FloorSnapLength={FloorSnapLength:0.000}");
+	}
+
+	private void UpdateCharacterBodyState(Vector3 upAxis)
+	{
+		Vector3 normalizedUp = upAxis.LengthSquared() > 0.0001f ? upAxis.Normalized() : Vector3.Up;
+		UpDirection = normalizedUp;
+		FloorMaxAngle = Mathf.Acos(Mathf.Clamp(groundMinDot, 0f, 1f));
+		FloorSnapLength = jumpGroundingLockTimer > 0f ? 0f : Mathf.Max(0f, groundProbeDistance);
+	}
+
+	private bool IsPlayerGrounded()
+	{
+		return jumpGroundingLockTimer <= 0f && IsOnFloor();
+	}
+
+	private void PlacePlayerAt(Vector3 targetPosition)
+	{
+		GlobalPosition = targetPosition;
+		jumpGroundingLockTimer = 0f;
+		UpdateCharacterBodyState(GetUpAxis());
+	}
+
+	private void ConfigureCapsule(float radius, float height, Vector3 center)
+	{
+		EnsureCapsule();
+		capsuleShape!.Radius = radius;
+		capsuleShape.Height = height;
+		capsule!.Position = center;
+	}
+
+	private void EnsureCapsule()
+	{
+		if (capsule is not null && capsuleShape is not null)
+		{
+			return;
+		}
+
+		capsule = GetNodeOrNull<CollisionShape3D>("CollisionShape3D");
+		if (capsule is null)
+		{
+			capsule = new CollisionShape3D
+			{
+				Name = "CollisionShape3D"
+			};
+			AddChild(capsule);
+		}
+
+		capsuleShape = capsule.Shape as CapsuleShape3D;
+		if (capsuleShape is null)
+		{
+			capsuleShape = new CapsuleShape3D();
+			capsule.Shape = capsuleShape;
+		}
+	}
+
 	private void HandleCursorLock()
 	{
+		if (inventoryTogglePressedThisFrame)
+		{
+			SetInventoryOpen(!inventoryOpen);
+			primaryPointerPressedThisFrame = false;
+			secondaryPointerPressedThisFrame = false;
+		}
+
 		if (WasEscapePressedThisFrame())
 		{
 			RuntimeLog.Info(RuntimeLogChannel.Player, "Unlocking cursor because escape was pressed.");
 			SetCursorLock(false);
+		}
+
+		if (inventoryOpen)
+		{
+			return;
 		}
 
 		if (WasPrimaryPointerPressedThisFrame() && Input.MouseMode != Input.MouseModeEnum.Captured)
@@ -600,11 +767,17 @@ public partial class PlanetPlayer : CustomRigidBody
 		}
 	}
 
-	private void SimulateBody(Vector3 upAxis, float deltaTime)
+	private void SimulateBody(Vector3 upAxis, float deltaTime, bool wasGrounded)
 	{
 		Vector3 velocity = Velocity;
+		Vector3 groundNormal = wasGrounded ? GetFloorNormal() : upAxis;
+		if (groundNormal.LengthSquared() < 0.0001f || groundNormal.Dot(upAxis) < groundMinDot)
+		{
+			groundNormal = upAxis;
+		}
+
 		float verticalSpeed = velocity.Dot(upAxis);
-		Vector3 lateralVelocity = velocity.Slide(upAxis);
+		Vector3 lateralVelocity = velocity.Slide(upAxis).Slide(groundNormal);
 
 		Vector3 forward = desiredForward.Slide(upAxis).Normalized();
 
@@ -621,70 +794,38 @@ public partial class PlanetPlayer : CustomRigidBody
 			desiredVelocity = desiredVelocity.Normalized();
 		}
 
-		desiredVelocity *= moveSpeed;
+		desiredVelocity = desiredVelocity.Slide(groundNormal) * moveSpeed;
 
-		float acceleration = moveAcceleration * (IsGrounded ? 1f : airControl);
+		float acceleration = moveAcceleration * (wasGrounded ? 1f : airControl);
 		lateralVelocity = lateralVelocity.MoveToward(desiredVelocity, acceleration * deltaTime);
 
-		float nearGroundProbeBonus = Mathf.Max(0.02f, jumpTakeoffDistance + Mathf.Max(0f, -verticalSpeed) * deltaTime);
-		bool canJumpFromNearGround = jumpBufferTimer > 0f &&
-			!IsGrounded &&
-			coyoteTimer <= 0f &&
-			CanStartGroundJump(upAxis, groundProbeDistance, nearGroundProbeBonus);
-		bool canJump = jumpBufferTimer > 0f && (IsGrounded || coyoteTimer > 0f || canJumpFromNearGround);
-		bool didJump = false;
+		bool canJump = jumpBufferTimer > 0f && (wasGrounded || coyoteTimer > 0f);
 
-		if (IsGrounded)
+		if (wasGrounded && verticalSpeed < 0f)
 		{
-			if (verticalSpeed < 0f)
-			{
-				verticalSpeed = 0f;
-			}
-
-			if (canJump)
-			{
-				ExecuteJump(upAxis, ref verticalSpeed);
-				didJump = true;
-			}
+			verticalSpeed = 0f;
 		}
-		else
-		{
-			if (canJump)
-			{
-				ExecuteJump(upAxis, ref verticalSpeed);
-				didJump = true;
-			}
 
-			if (!didJump)
-			{
-				verticalSpeed -= gravityStrength * deltaTime;
-			}
+		if (canJump)
+		{
+			ExecuteJump(upAxis, ref verticalSpeed);
+		}
+		else if (!wasGrounded)
+		{
+			verticalSpeed -= gravityStrength * deltaTime;
 		}
 
 		Velocity = lateralVelocity + upAxis * verticalSpeed;
-		Simulate(upAxis, deltaTime, groundProbeDistance);
+		MoveAndSlide();
 
-		if (!didJump && jumpBufferTimer > 0f && IsGrounded)
+		if (IsPlayerGrounded())
 		{
-			Vector3 postSimVelocity = Velocity;
-			Vector3 postSimLateralVelocity = postSimVelocity.Slide(upAxis);
-			float postSimVerticalSpeed = Mathf.Max(0f, postSimVelocity.Dot(upAxis));
-			ExecuteJump(upAxis, ref postSimVerticalSpeed);
-			Velocity = postSimLateralVelocity + upAxis * postSimVerticalSpeed;
+			Vector3 resolvedFloorNormal = GetFloorNormal();
+			if (resolvedFloorNormal.LengthSquared() > 0.0001f)
+			{
+				Velocity = Velocity.Slide(resolvedFloorNormal);
+			}
 		}
-	}
-
-	private bool CanStartGroundJump(Vector3 upAxis, float groundProbeDistance, float extraProbeDistance = 0f)
-	{
-		if (IsGroundingSuppressed)
-		{
-			return false;
-		}
-
-		Vector3 normalizedUp = upAxis.Normalized();
-		float probeDistance = Mathf.Max(0f, groundProbeDistance) + Mathf.Max(0f, extraProbeDistance);
-		return TryProbeGround(normalizedUp, probeDistance, out _, out Vector3 groundNormal) &&
-			   groundNormal.Dot(normalizedUp) >= MinGroundDot;
 	}
 
 	private void AlignToSurface(Vector3 upAxis, bool immediate)
@@ -712,25 +853,6 @@ public partial class PlanetPlayer : CustomRigidBody
 
 	private void HandleBlockInput()
 	{
-		VoxelBlockType previousBlock = selectedBlock;
-		if (WasDigitPressedThisFrame(1))
-		{
-			selectedBlock = VoxelBlockType.Grass;
-		}
-		else if (WasDigitPressedThisFrame(2))
-		{
-			selectedBlock = VoxelBlockType.Dirt;
-		}
-		else if (WasDigitPressedThisFrame(3))
-		{
-			selectedBlock = VoxelBlockType.Stone;
-		}
-
-		if (selectedBlock != previousBlock)
-		{
-			RuntimeLog.Info(RuntimeLogChannel.Player, $"Selected block changed from {previousBlock} to {selectedBlock}.");
-		}
-
 		if (playerCamera == null)
 		{
 			return;
@@ -744,6 +866,22 @@ public partial class PlanetPlayer : CustomRigidBody
 		if (WasSecondaryPointerPressedThisFrame())
 		{
 			TryPlaceBlock();
+		}
+	}
+
+	private void HandleHotbarSelection()
+	{
+		if (pendingHotbarSelection < 0)
+		{
+			return;
+		}
+
+		int previousSlot = selectedHotbarSlot;
+		SelectHotbarSlot(pendingHotbarSelection);
+		if (previousSlot != selectedHotbarSlot)
+		{
+			RuntimeLog.Info(RuntimeLogChannel.Player,
+				$"Selected hotbar slot changed from {previousSlot + 1} to {selectedHotbarSlot + 1}. Block={GetSelectedHotbarBlockType()}, Count={GetSelectedHotbarCount()}");
 		}
 	}
 
@@ -762,8 +900,20 @@ public partial class PlanetPlayer : CustomRigidBody
 
 		if (world.TryGetBreakCell(collider, faceIndex, position, normal, out PlanetCellId targetCell))
 		{
+			if (!world.TryGetBlockType(targetCell, out VoxelBlockType brokenBlockType))
+			{
+				RuntimeLog.Info(RuntimeLogChannel.Player, $"Break block skipped because target cell {targetCell} had no collectable block.");
+				return;
+			}
+
+			if (!TryAddBlockToInventory(brokenBlockType))
+			{
+				RuntimeLog.Info(RuntimeLogChannel.Player, $"Break block skipped because the inventory is full. Block={brokenBlockType}, Cell={targetCell}");
+				return;
+			}
+
 			RuntimeLog.Info(RuntimeLogChannel.Player,
-				$"Breaking block at {targetCell}. FaceIndex={faceIndex}, HitPosition={RuntimeLog.FormatVector(position)}, HitNormal={RuntimeLog.FormatVector(normal)}");
+				$"Breaking block {brokenBlockType} at {targetCell}. FaceIndex={faceIndex}, HitPosition={RuntimeLog.FormatVector(position)}, HitNormal={RuntimeLog.FormatVector(normal)}");
 			world.RemoveBlock(targetCell);
 		}
 		else
@@ -777,6 +927,13 @@ public partial class PlanetPlayer : CustomRigidBody
 	{
 		if (world == null || playerCamera == null)
 		{
+			return;
+		}
+
+		VoxelBlockType selectedBlock = GetSelectedHotbarBlockType();
+		if (selectedBlock == VoxelBlockType.Air || GetSelectedHotbarCount() <= 0)
+		{
+			RuntimeLog.Info(RuntimeLogChannel.Player, $"Place block skipped because hotbar slot {selectedHotbarSlot + 1} is empty.");
 			return;
 		}
 
@@ -799,7 +956,7 @@ public partial class PlanetPlayer : CustomRigidBody
 			return;
 		}
 
-		if (Bounds.Intersects(world.GetCellAabb(targetCell)))
+		if (GetPlayerBounds().Intersects(world.GetCellAabb(targetCell)))
 		{
 			RuntimeLog.Info(RuntimeLogChannel.Player, $"Place block skipped because target cell {targetCell} intersects the player bounds.");
 			return;
@@ -808,6 +965,7 @@ public partial class PlanetPlayer : CustomRigidBody
 		RuntimeLog.Info(RuntimeLogChannel.Player,
 			$"Placing block {selectedBlock} at {targetCell}. FaceIndex={faceIndex}, HitPosition={RuntimeLog.FormatVector(position)}, HitNormal={RuntimeLog.FormatVector(normal)}");
 		world.PlaceBlock(targetCell, selectedBlock);
+		ConsumeSelectedHotbarBlock();
 	}
 
 	private bool TryRaycastFromCamera(out CollisionObject3D? collider, out int faceIndex, out Vector3 position, out Vector3 normal)
@@ -902,15 +1060,90 @@ public partial class PlanetPlayer : CustomRigidBody
 		Input.MouseMode = isLocked ? Input.MouseModeEnum.Captured : Input.MouseModeEnum.Visible;
 	}
 
+	private void SetInventoryOpen(bool isOpen)
+	{
+		inventoryOpen = isOpen;
+		if (inventoryOpen)
+		{
+			jumpQueued = false;
+			moveInput = Vector2.Zero;
+		}
+		else
+		{
+			ReturnCarriedItemToInventory();
+		}
+
+		if (inventoryOpen)
+		{
+			SetCursorLock(false);
+		}
+		else if (gameplayEnabled)
+		{
+			SetCursorLock(true);
+		}
+
+		UpdateHudVisibility();
+	}
+
 	private void ExecuteJump(Vector3 upAxis, ref float verticalSpeed)
 	{
 		verticalSpeed = jumpSpeed;
 		coyoteTimer = 0f;
 		jumpBufferTimer = 0f;
-		MoveWithCollision(upAxis * jumpTakeoffDistance);
-		SuppressGrounding(jumpGroundingLockTime);
+		jumpGroundingLockTimer = jumpGroundingLockTime;
+		FloorSnapLength = 0f;
 		RuntimeLog.Info(RuntimeLogChannel.Player,
-			$"Jump executed. VerticalSpeed={verticalSpeed:0.00}, TakeoffDistance={jumpTakeoffDistance:0.00}, Position={RuntimeLog.FormatVector(GlobalPosition)}, UpAxis={RuntimeLog.FormatVector(upAxis)}");
+			$"Jump executed. VerticalSpeed={verticalSpeed:0.00}, Position={RuntimeLog.FormatVector(GlobalPosition)}, UpAxis={RuntimeLog.FormatVector(upAxis)}");
+	}
+
+	private Aabb GetPlayerBounds()
+	{
+		EnsureCapsule();
+
+		Vector3 upAxis = UpDirection.LengthSquared() > 0.0001f ? UpDirection.Normalized() : GetUpAxis();
+		Vector3 center = GlobalTransform.Origin + GlobalBasis * capsule!.Position;
+		float radius = GetScaledCapsuleRadius();
+		float halfHeight = Mathf.Max(GetScaledCapsuleHeight() * 0.5f - radius, 0f);
+		Vector3 top = center + upAxis * halfHeight;
+		Vector3 bottom = center - upAxis * halfHeight;
+		Vector3 min = new(
+			Mathf.Min(top.X, bottom.X) - radius,
+			Mathf.Min(top.Y, bottom.Y) - radius,
+			Mathf.Min(top.Z, bottom.Z) - radius);
+		Vector3 max = new(
+			Mathf.Max(top.X, bottom.X) + radius,
+			Mathf.Max(top.Y, bottom.Y) + radius,
+			Mathf.Max(top.Z, bottom.Z) + radius);
+		return new Aabb(min, max - min);
+	}
+
+	private float GetScaledCapsuleRadius()
+	{
+		EnsureCapsule();
+		Vector3 scale = GlobalTransform.Basis.Scale.Abs();
+		return capsuleShape!.Radius * Mathf.Max(scale.X, scale.Z);
+	}
+
+	private float GetScaledCapsuleHeight()
+	{
+		EnsureCapsule();
+		return capsuleShape!.Height * Mathf.Abs(GlobalTransform.Basis.Scale.Y);
+	}
+
+	private void MoveRotation(Quaternion targetRotation)
+	{
+		Quaternion currentRotation = GlobalBasis.GetRotationQuaternion();
+		float angleDelta = currentRotation.AngleTo(targetRotation);
+
+		if (angleDelta <= RotationDeadzoneRadians)
+		{
+			return;
+		}
+
+		float deltaTime = Mathf.Max(0.0001f, (float)GetPhysicsProcessDeltaTime());
+		float blend = 1f - Mathf.Exp(-RotationSharpness * deltaTime);
+		Quaternion nextRotation = currentRotation.Slerp(targetRotation, blend).Normalized();
+		GlobalBasis = new Basis(nextRotation).Orthonormalized();
 	}
 
 	private Vector2 ReadLookInput()
@@ -933,17 +1166,6 @@ public partial class PlanetPlayer : CustomRigidBody
 	private bool WasSecondaryPointerPressedThisFrame()
 	{
 		return secondaryPointerPressedThisFrame;
-	}
-
-	private bool WasDigitPressedThisFrame(int digit)
-	{
-		return digit switch
-		{
-			1 => digit1PressedThisFrame,
-			2 => digit2PressedThisFrame,
-			3 => digit3PressedThisFrame,
-			_ => false
-		};
 	}
 
 	private static bool IsMoveForwardPressed()
@@ -996,37 +1218,119 @@ public partial class PlanetPlayer : CustomRigidBody
 		{
 			hud.AddChild(root);
 		}
+		root.GetNodeOrNull<Control>("HelpLabel")?.QueueFree();
+		root.GetNodeOrNull<Control>("SelectedBlockLabel")?.QueueFree();
+		root.GetNodeOrNull<Control>("InventoryLabel")?.QueueFree();
+		root.GetNodeOrNull<Control>("HotbarLabel")?.QueueFree();
 
-		if (root.GetNodeOrNull<Label>("HelpLabel") is null)
+		inventoryPanel = root.GetNodeOrNull<PanelContainer>("InventoryPanel");
+		if (inventoryPanel == null)
 		{
-			Label helpLabel = new()
+			inventoryPanel = new PanelContainer
 			{
-				Name = "HelpLabel",
-				Position = new Vector2(16f, 16f),
-				Size = new Vector2(420f, 120f),
-				Text =
-					"WASD move\n" +
-					"Space jump\n" +
-					"Left click break block\n" +
-					"Right click place block\n" +
-					"1 Grass  2 Dirt  3 Stone\n" +
-					"Esc menu  F5 save",
-				MouseFilter = Control.MouseFilterEnum.Ignore
+				Name = "InventoryPanel",
+				Visible = false,
+				CustomMinimumSize = new Vector2(860f, 360f),
+				MouseFilter = Control.MouseFilterEnum.Pass
 			};
-			root.AddChild(helpLabel);
+			inventoryPanel.AddThemeStyleboxOverride("panel", CreatePanelStyle(new Color(0.05f, 0.07f, 0.09f, 0.94f), new Color(0.42f, 0.48f, 0.54f, 0.95f), 2));
+			root.AddChild(inventoryPanel);
+
+			MarginContainer inventoryMargin = new()
+			{
+				MouseFilter = Control.MouseFilterEnum.Pass
+			};
+			inventoryMargin.AddThemeConstantOverride("margin_left", 18);
+			inventoryMargin.AddThemeConstantOverride("margin_top", 18);
+			inventoryMargin.AddThemeConstantOverride("margin_right", 18);
+			inventoryMargin.AddThemeConstantOverride("margin_bottom", 18);
+			inventoryPanel.AddChild(inventoryMargin);
+
+			VBoxContainer inventoryLayout = new()
+			{
+				MouseFilter = Control.MouseFilterEnum.Pass
+			};
+			inventoryLayout.AddThemeConstantOverride("separation", 14);
+			inventoryMargin.AddChild(inventoryLayout);
+
+			Label inventoryTitle = new()
+			{
+				Name = "InventoryTitle",
+				Text = "Inventory",
+				HorizontalAlignment = HorizontalAlignment.Center,
+				MouseFilter = Control.MouseFilterEnum.Pass
+			};
+			inventoryTitle.AddThemeFontSizeOverride("font_size", 26);
+			inventoryLayout.AddChild(inventoryTitle);
+
+			inventoryGrid = new GridContainer
+			{
+				Name = "InventoryGrid",
+				Columns = HotbarSlotCount,
+				MouseFilter = Control.MouseFilterEnum.Pass
+			};
+			inventoryGrid.AddThemeConstantOverride("h_separation", 8);
+			inventoryGrid.AddThemeConstantOverride("v_separation", 8);
+			inventoryLayout.AddChild(inventoryGrid);
+		}
+		else
+		{
+			inventoryGrid = inventoryPanel.GetNodeOrNull<GridContainer>("InventoryGrid");
 		}
 
-		selectedBlockLabel = root.GetNodeOrNull<Label>("SelectedBlockLabel");
-		if (selectedBlockLabel == null)
+		hotbarContainer = root.GetNodeOrNull<HBoxContainer>("HotbarContainer");
+		if (hotbarContainer == null)
 		{
-			selectedBlockLabel = new Label
+			hotbarContainer = new HBoxContainer
 			{
-				Name = "SelectedBlockLabel",
-				Position = new Vector2(16f, 128f),
-				Size = new Vector2(320f, 24f),
-				MouseFilter = Control.MouseFilterEnum.Ignore
+				Name = "HotbarContainer",
+				MouseFilter = Control.MouseFilterEnum.Pass
 			};
-			root.AddChild(selectedBlockLabel);
+			hotbarContainer.AddThemeConstantOverride("separation", 8);
+			root.AddChild(hotbarContainer);
+		}
+
+		for (int slotIndex = 0; slotIndex < HotbarSlotCount; slotIndex++)
+		{
+			if (hotbarSlotPanels[slotIndex] != null)
+			{
+				continue;
+			}
+
+			hotbarSlotPanels[slotIndex] = CreateSlotPanel($"HotbarSlot{slotIndex}", new Vector2(78f, 78f), out Label slotLabel);
+			hotbarSlotLabels[slotIndex] = slotLabel;
+			int capturedSlotIndex = slotIndex;
+			hotbarSlotPanels[slotIndex]!.GuiInput += @event => HandleInventorySlotGuiInput(capturedSlotIndex, true, @event);
+			hotbarContainer.AddChild(hotbarSlotPanels[slotIndex]);
+		}
+
+		for (int slotIndex = 0; slotIndex < InventorySlotCount; slotIndex++)
+		{
+			if (inventorySlotPanels[slotIndex] != null)
+			{
+				continue;
+			}
+
+			inventorySlotPanels[slotIndex] = CreateSlotPanel($"InventorySlot{slotIndex}", new Vector2(78f, 78f), out Label slotLabel);
+			inventorySlotLabels[slotIndex] = slotLabel;
+			int capturedSlotIndex = slotIndex;
+			inventorySlotPanels[slotIndex]!.GuiInput += @event => HandleInventorySlotGuiInput(capturedSlotIndex, false, @event);
+			inventoryGrid?.AddChild(inventorySlotPanels[slotIndex]);
+		}
+
+		carriedItemPanel = root.GetNodeOrNull<PanelContainer>("CarriedItemPanel");
+		if (carriedItemPanel == null)
+		{
+			carriedItemPanel = CreateSlotPanel("CarriedItemPanel", new Vector2(78f, 78f), out Label slotLabel);
+			carriedItemLabel = slotLabel;
+			carriedItemPanel.ZIndex = 100;
+			carriedItemPanel.MouseFilter = Control.MouseFilterEnum.Ignore;
+			carriedItemPanel.Visible = false;
+			root.AddChild(carriedItemPanel);
+		}
+		else
+		{
+			carriedItemLabel ??= carriedItemPanel.FindChild("SlotLabel", true, false) as Label;
 		}
 
 		crosshairHorizontal = root.GetNodeOrNull<ColorRect>("CrosshairHorizontal");
@@ -1054,36 +1358,366 @@ public partial class PlanetPlayer : CustomRigidBody
 			};
 			root.AddChild(crosshairVertical);
 		}
+
+		UpdateHudVisibility();
 	}
 
 	private void UpdateHud()
 	{
-		if (selectedBlockLabel != null)
+		Vector2 center = GetViewport().GetVisibleRect().Size * 0.5f;
+		Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
+		Vector2 mousePosition = GetViewport().GetMousePosition();
+
+		if (inventoryPanel != null)
 		{
-			selectedBlockLabel.Text = "Selected block: " + selectedBlock;
+			inventoryPanel.Position = new Vector2(
+				Mathf.Max(24f, center.X - inventoryPanel.CustomMinimumSize.X * 0.5f),
+				Mathf.Max(36f, center.Y - inventoryPanel.CustomMinimumSize.Y * 0.5f));
 		}
 
-		Vector2 center = GetViewport().GetVisibleRect().Size * 0.5f;
+		if (hotbarContainer != null)
+		{
+			float hotbarWidth = HotbarSlotCount * 78f + (HotbarSlotCount - 1) * 8f;
+			hotbarContainer.Position = new Vector2(
+				Mathf.Max(16f, center.X - hotbarWidth * 0.5f),
+				viewportSize.Y - 102f);
+		}
+
+		UpdateHotbarUi();
+		UpdateInventoryUi();
+		UpdateCarriedItemUi(mousePosition);
+		UpdateHudVisibility();
 
 		if (crosshairHorizontal != null)
 		{
+			crosshairHorizontal.Visible = !inventoryOpen;
 			crosshairHorizontal.Position = center - crosshairHorizontal.Size * 0.5f;
 		}
 
 		if (crosshairVertical != null)
 		{
+			crosshairVertical.Visible = !inventoryOpen;
 			crosshairVertical.Position = center - crosshairVertical.Size * 0.5f;
 		}
+	}
+
+	private void UpdateHudVisibility()
+	{
+		if (inventoryPanel != null)
+		{
+			inventoryPanel.Visible = inventoryOpen;
+		}
+
+		if (carriedItemPanel != null)
+		{
+			carriedItemPanel.Visible = inventoryOpen && HasCarriedItem;
+		}
+	}
+
+	private void UpdateHotbarUi()
+	{
+		for (int slotIndex = 0; slotIndex < HotbarSlotCount; slotIndex++)
+		{
+			ApplySlotVisualState(
+				hotbarSlotPanels[slotIndex],
+				hotbarSlotLabels[slotIndex],
+				slotIndex,
+				showSlotNumber: false,
+				isSelected: slotIndex == selectedHotbarSlot);
+		}
+	}
+
+	private void UpdateInventoryUi()
+	{
+		for (int slotIndex = 0; slotIndex < InventorySlotCount; slotIndex++)
+		{
+			ApplySlotVisualState(
+				inventorySlotPanels[slotIndex],
+				inventorySlotLabels[slotIndex],
+				HotbarSlotCount + slotIndex,
+				showSlotNumber: false,
+				isSelected: false);
+		}
+	}
+
+	private void UpdateCarriedItemUi(Vector2 mousePosition)
+	{
+		if (carriedItemPanel == null || carriedItemLabel == null)
+		{
+			return;
+		}
+
+		bool visible = inventoryOpen && HasCarriedItem;
+		carriedItemPanel.Visible = visible;
+		if (!visible)
+		{
+			return;
+		}
+
+		carriedItemPanel.Position = mousePosition - carriedItemPanel.CustomMinimumSize * 0.5f;
+		carriedItemPanel.AddThemeStyleboxOverride("panel", CreatePanelStyle(GetBlockUiColor(carriedBlockType), new Color(0.95f, 0.95f, 0.95f, 0.95f), 2));
+		carriedItemLabel.Text = GetBlockShortCode(carriedBlockType) + "\n" + "x" + carriedBlockCount;
+		carriedItemLabel.Modulate = Colors.White;
+	}
+
+	private void ApplySlotVisualState(PanelContainer? slotPanel, Label? slotLabel, int inventorySlotIndex, bool showSlotNumber, bool isSelected)
+	{
+		if (slotPanel == null || slotLabel == null)
+		{
+			return;
+		}
+
+		VoxelBlockType blockType = inventoryBlockTypes[inventorySlotIndex];
+		int blockCount = inventoryBlockCounts[inventorySlotIndex];
+		bool hasItem = blockType != VoxelBlockType.Air && blockCount > 0;
+
+		Color fillColor = hasItem ? GetBlockUiColor(blockType) : new Color(0.11f, 0.13f, 0.16f, 0.94f);
+		Color borderColor = isSelected ? new Color(0.98f, 0.86f, 0.32f, 1f) : new Color(0.39f, 0.46f, 0.55f, 0.92f);
+		int borderWidth = isSelected ? 4 : 2;
+
+		slotPanel.AddThemeStyleboxOverride("panel", CreatePanelStyle(fillColor, borderColor, borderWidth));
+		slotLabel.Text = GetVisualSlotText(inventorySlotIndex, showSlotNumber);
+		slotLabel.Modulate = hasItem ? Colors.White : new Color(0.74f, 0.79f, 0.85f, 0.78f);
+	}
+
+	private void HandleInventorySlotGuiInput(int slotIndex, bool isHotbar, InputEvent @event)
+	{
+		if (!inventoryOpen || @event is not InputEventMouseButton mouseButton || !mouseButton.Pressed)
+		{
+			return;
+		}
+
+		int inventorySlotIndex = isHotbar ? slotIndex : HotbarSlotCount + slotIndex;
+		switch (mouseButton.ButtonIndex)
+		{
+			case MouseButton.Left:
+				HandleInventoryLeftClick(inventorySlotIndex);
+				break;
+			case MouseButton.Right:
+				HandleInventoryRightClick(inventorySlotIndex);
+				break;
+		}
+	}
+
+	private void HandleInventoryLeftClick(int inventorySlotIndex)
+	{
+		VoxelBlockType slotBlockType = inventoryBlockTypes[inventorySlotIndex];
+		int slotBlockCount = inventoryBlockCounts[inventorySlotIndex];
+
+		if (!HasCarriedItem)
+		{
+			if (slotBlockType == VoxelBlockType.Air || slotBlockCount <= 0)
+			{
+				return;
+			}
+
+			carriedBlockType = slotBlockType;
+			carriedBlockCount = slotBlockCount;
+			SetInventorySlot(inventorySlotIndex, VoxelBlockType.Air, 0);
+			return;
+		}
+
+		if (slotBlockType == VoxelBlockType.Air || slotBlockCount <= 0)
+		{
+			SetInventorySlot(inventorySlotIndex, carriedBlockType, carriedBlockCount);
+			ClearCarriedItem();
+			return;
+		}
+
+		if (slotBlockType == carriedBlockType && slotBlockCount < MaxInventoryStackSize)
+		{
+			int transferCount = Mathf.Min(MaxInventoryStackSize - slotBlockCount, carriedBlockCount);
+			SetInventorySlot(inventorySlotIndex, slotBlockType, slotBlockCount + transferCount);
+			carriedBlockCount -= transferCount;
+			if (carriedBlockCount <= 0)
+			{
+				ClearCarriedItem();
+			}
+
+			return;
+		}
+
+		SwapCarriedItemWithSlot(inventorySlotIndex);
+	}
+
+	private void HandleInventoryRightClick(int inventorySlotIndex)
+	{
+		VoxelBlockType slotBlockType = inventoryBlockTypes[inventorySlotIndex];
+		int slotBlockCount = inventoryBlockCounts[inventorySlotIndex];
+
+		if (!HasCarriedItem)
+		{
+			if (slotBlockType == VoxelBlockType.Air || slotBlockCount <= 0)
+			{
+				return;
+			}
+
+			int pickupCount = Mathf.CeilToInt(slotBlockCount * 0.5f);
+			carriedBlockType = slotBlockType;
+			carriedBlockCount = pickupCount;
+			SetInventorySlot(inventorySlotIndex, slotBlockType, slotBlockCount - pickupCount);
+			return;
+		}
+
+		if (slotBlockType != VoxelBlockType.Air && slotBlockType != carriedBlockType)
+		{
+			return;
+		}
+
+		if (slotBlockType == carriedBlockType && slotBlockCount >= MaxInventoryStackSize)
+		{
+			return;
+		}
+
+		VoxelBlockType placedType = slotBlockType == VoxelBlockType.Air ? carriedBlockType : slotBlockType;
+		SetInventorySlot(inventorySlotIndex, placedType, slotBlockCount + 1);
+		carriedBlockCount--;
+		if (carriedBlockCount <= 0)
+		{
+			ClearCarriedItem();
+		}
+	}
+
+	private void SwapCarriedItemWithSlot(int inventorySlotIndex)
+	{
+		VoxelBlockType slotBlockType = inventoryBlockTypes[inventorySlotIndex];
+		int slotBlockCount = inventoryBlockCounts[inventorySlotIndex];
+		SetInventorySlot(inventorySlotIndex, carriedBlockType, carriedBlockCount);
+		carriedBlockType = slotBlockType;
+		carriedBlockCount = slotBlockCount;
+	}
+
+	private void ClearCarriedItem()
+	{
+		carriedBlockType = VoxelBlockType.Air;
+		carriedBlockCount = 0;
+	}
+
+	private void ReturnCarriedItemToInventory()
+	{
+		if (!HasCarriedItem)
+		{
+			return;
+		}
+
+		int remainingCount = carriedBlockCount;
+		while (remainingCount > 0)
+		{
+			if (!TryAddBlockToInventory(carriedBlockType))
+			{
+				break;
+			}
+
+			remainingCount--;
+		}
+
+		if (remainingCount <= 0)
+		{
+			ClearCarriedItem();
+		}
+		else
+		{
+			carriedBlockCount = remainingCount;
+		}
+	}
+
+	private string GetVisualSlotText(int inventorySlotIndex, bool showSlotNumber)
+	{
+		VoxelBlockType blockType = inventoryBlockTypes[inventorySlotIndex];
+		int blockCount = inventoryBlockCounts[inventorySlotIndex];
+		string topLine = showSlotNumber ? (inventorySlotIndex + 1).ToString() : string.Empty;
+		string itemLine = blockType == VoxelBlockType.Air || blockCount <= 0
+			? (showSlotNumber ? "-" : string.Empty)
+			: GetBlockShortCode(blockType);
+		string countLine = blockType == VoxelBlockType.Air || blockCount <= 0
+			? string.Empty
+			: "x" + blockCount;
+
+		StringBuilder builder = new();
+		if (!string.IsNullOrEmpty(topLine))
+		{
+			builder.Append(topLine);
+			builder.Append('\n');
+		}
+
+		builder.Append(itemLine);
+		if (!string.IsNullOrEmpty(countLine))
+		{
+			builder.Append('\n');
+			builder.Append(countLine);
+		}
+
+		return builder.ToString().TrimEnd();
+	}
+
+	private PanelContainer CreateSlotPanel(string name, Vector2 size, out Label slotLabel)
+	{
+		PanelContainer slotPanel = new()
+		{
+			Name = name,
+			CustomMinimumSize = size,
+			MouseFilter = Control.MouseFilterEnum.Stop
+		};
+		slotPanel.AddThemeStyleboxOverride("panel", CreatePanelStyle(new Color(0.11f, 0.13f, 0.16f, 0.94f), new Color(0.39f, 0.46f, 0.55f, 0.92f), 2));
+
+		MarginContainer margin = new()
+		{
+			MouseFilter = Control.MouseFilterEnum.Ignore
+		};
+		margin.AddThemeConstantOverride("margin_left", 4);
+		margin.AddThemeConstantOverride("margin_top", 4);
+		margin.AddThemeConstantOverride("margin_right", 4);
+		margin.AddThemeConstantOverride("margin_bottom", 4);
+		slotPanel.AddChild(margin);
+
+		slotLabel = new Label
+		{
+			Name = "SlotLabel",
+			HorizontalAlignment = HorizontalAlignment.Center,
+			VerticalAlignment = VerticalAlignment.Center,
+			AutowrapMode = TextServer.AutowrapMode.WordSmart,
+			MouseFilter = Control.MouseFilterEnum.Ignore
+		};
+		slotLabel.AddThemeFontSizeOverride("font_size", 16);
+		margin.AddChild(slotLabel);
+		return slotPanel;
+	}
+
+	private static StyleBoxFlat CreatePanelStyle(Color backgroundColor, Color borderColor, int borderWidth)
+	{
+		return new StyleBoxFlat
+		{
+			BgColor = backgroundColor,
+			BorderColor = borderColor,
+			BorderWidthBottom = borderWidth,
+			BorderWidthTop = borderWidth,
+			BorderWidthLeft = borderWidth,
+			BorderWidthRight = borderWidth,
+			CornerRadiusBottomLeft = 8,
+			CornerRadiusBottomRight = 8,
+			CornerRadiusTopLeft = 8,
+			CornerRadiusTopRight = 8
+		};
+	}
+
+	private static Color GetBlockUiColor(VoxelBlockType blockType)
+	{
+		return blockType switch
+		{
+			VoxelBlockType.Grass => new Color(0.23f, 0.43f, 0.20f, 0.96f),
+			VoxelBlockType.Dirt => new Color(0.36f, 0.23f, 0.15f, 0.96f),
+			VoxelBlockType.Stone => new Color(0.33f, 0.36f, 0.40f, 0.96f),
+			_ => new Color(0.11f, 0.13f, 0.16f, 0.94f)
+		};
 	}
 
 	private void ClearFrameInput()
 	{
 		escapePressedThisFrame = false;
+		inventoryTogglePressedThisFrame = false;
 		primaryPointerPressedThisFrame = false;
 		secondaryPointerPressedThisFrame = false;
-		digit1PressedThisFrame = false;
-		digit2PressedThisFrame = false;
-		digit3PressedThisFrame = false;
+		pendingHotbarSelection = -1;
 	}
 
 	private bool ConsumeJumpPress()
@@ -1123,4 +1757,159 @@ public partial class PlanetPlayer : CustomRigidBody
 			}
 		}
 	}
+
+	private void ClearInventory()
+	{
+		for (int slotIndex = 0; slotIndex < TotalInventorySlotCount; slotIndex++)
+		{
+			inventoryBlockTypes[slotIndex] = VoxelBlockType.Air;
+			inventoryBlockCounts[slotIndex] = 0;
+		}
+	}
+
+	private void SetInventorySlot(int slotIndex, VoxelBlockType blockType, int count)
+	{
+		if (slotIndex < 0 || slotIndex >= TotalInventorySlotCount)
+		{
+			return;
+		}
+
+		if (blockType == VoxelBlockType.Air || count <= 0)
+		{
+			inventoryBlockTypes[slotIndex] = VoxelBlockType.Air;
+			inventoryBlockCounts[slotIndex] = 0;
+			return;
+		}
+
+		inventoryBlockTypes[slotIndex] = blockType;
+		inventoryBlockCounts[slotIndex] = Mathf.Clamp(count, 1, MaxInventoryStackSize);
+	}
+
+	private void SelectHotbarSlot(int slotIndex)
+	{
+		selectedHotbarSlot = Mathf.Clamp(slotIndex, 0, HotbarSlotCount - 1);
+	}
+
+	private void SelectOrCreateHotbarBlock(VoxelBlockType blockType)
+	{
+		int matchingHotbarSlot = FindMatchingSlot(blockType, onlyHotbar: true);
+		if (matchingHotbarSlot >= 0)
+		{
+			SelectHotbarSlot(matchingHotbarSlot);
+			return;
+		}
+
+		SetInventorySlot(selectedHotbarSlot, blockType, blockType == VoxelBlockType.Air ? 0 : 1);
+	}
+
+	private VoxelBlockType GetSelectedHotbarBlockType()
+	{
+		return inventoryBlockCounts[selectedHotbarSlot] > 0 ? inventoryBlockTypes[selectedHotbarSlot] : VoxelBlockType.Air;
+	}
+
+	private int GetSelectedHotbarCount()
+	{
+		return inventoryBlockCounts[selectedHotbarSlot];
+	}
+
+	private bool TryAddBlockToInventory(VoxelBlockType blockType)
+	{
+		if (blockType == VoxelBlockType.Air)
+		{
+			return false;
+		}
+
+		int targetSlot = FindSlotWithSpace(blockType);
+		if (targetSlot < 0)
+		{
+			targetSlot = FindFirstEmptySlot();
+		}
+
+		if (targetSlot < 0)
+		{
+			return false;
+		}
+
+		if (inventoryBlockTypes[targetSlot] == VoxelBlockType.Air)
+		{
+			inventoryBlockTypes[targetSlot] = blockType;
+		}
+
+		inventoryBlockCounts[targetSlot] = Mathf.Min(MaxInventoryStackSize, inventoryBlockCounts[targetSlot] + 1);
+
+		if (GetSelectedHotbarBlockType() == VoxelBlockType.Air && targetSlot < HotbarSlotCount)
+		{
+			SelectHotbarSlot(targetSlot);
+		}
+
+		return true;
+	}
+
+	private void ConsumeSelectedHotbarBlock()
+	{
+		if (inventoryBlockCounts[selectedHotbarSlot] <= 0)
+		{
+			return;
+		}
+
+		inventoryBlockCounts[selectedHotbarSlot]--;
+		if (inventoryBlockCounts[selectedHotbarSlot] <= 0)
+		{
+			inventoryBlockCounts[selectedHotbarSlot] = 0;
+			inventoryBlockTypes[selectedHotbarSlot] = VoxelBlockType.Air;
+		}
+	}
+
+	private int FindSlotWithSpace(VoxelBlockType blockType)
+	{
+		for (int slotIndex = 0; slotIndex < TotalInventorySlotCount; slotIndex++)
+		{
+			if (inventoryBlockTypes[slotIndex] == blockType && inventoryBlockCounts[slotIndex] > 0 && inventoryBlockCounts[slotIndex] < MaxInventoryStackSize)
+			{
+				return slotIndex;
+			}
+		}
+
+		return -1;
+	}
+
+	private int FindFirstEmptySlot()
+	{
+		for (int slotIndex = 0; slotIndex < TotalInventorySlotCount; slotIndex++)
+		{
+			if (inventoryBlockTypes[slotIndex] == VoxelBlockType.Air || inventoryBlockCounts[slotIndex] <= 0)
+			{
+				return slotIndex;
+			}
+		}
+
+		return -1;
+	}
+
+	private int FindMatchingSlot(VoxelBlockType blockType, bool onlyHotbar)
+	{
+		int endSlot = onlyHotbar ? HotbarSlotCount : TotalInventorySlotCount;
+		for (int slotIndex = 0; slotIndex < endSlot; slotIndex++)
+		{
+			if (inventoryBlockTypes[slotIndex] == blockType && inventoryBlockCounts[slotIndex] > 0)
+			{
+				return slotIndex;
+			}
+		}
+
+		return -1;
+	}
+
+	private static string GetBlockShortCode(VoxelBlockType blockType)
+	{
+		return blockType switch
+		{
+			VoxelBlockType.Grass => "G",
+			VoxelBlockType.Dirt => "D",
+			VoxelBlockType.Stone => "S",
+			_ => "-"
+		};
+	}
+
+	private bool HasCarriedItem => carriedBlockType != VoxelBlockType.Air && carriedBlockCount > 0;
 }

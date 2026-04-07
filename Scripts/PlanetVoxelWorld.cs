@@ -78,10 +78,7 @@ public partial class PlanetVoxelWorld : Node3D
 	[Export] public float HeightVariationInBlocks { get; set; } = 2.5f;
 	[Export] public float NoiseScale { get; set; } = 1.8f;
 	[Export] public int WorldSeed { get; set; } = 1337;
-	[Export(PropertyHint.Range, "0,1,0.01")] public float FaceCoordinateUniformity { get; set; } = 0.4f;
-	[Export(PropertyHint.Range, "0,1,0.01")] public float PolynomialWarpBias { get; set; } = 0.6f;
 	[Export] public Vector3 DistortionOptimizedRotationEuler { get; set; } = Vector3.Zero;
-	[Export(PropertyHint.Range, "0,1,0.01")] public float LocalCellDeformation { get; set; } = 0.9f;
 	[Export] public float BlockSize { get; set; } = 1f;
 	[Export] public bool GenerateOnReady { get; set; }
 
@@ -157,10 +154,7 @@ public partial class PlanetVoxelWorld : Node3D
 		HeightVariationInBlocks = Mathf.Max(0f, data.HeightVariationInBlocks);
 		NoiseScale = Mathf.Max(0.01f, data.NoiseScale);
 		WorldSeed = data.WorldSeed;
-		FaceCoordinateUniformity = Mathf.Clamp(data.FaceCoordinateUniformity, 0f, 1f);
-		PolynomialWarpBias = Mathf.Clamp(data.PolynomialWarpBias, 0f, 1f);
 		DistortionOptimizedRotationEuler = data.DistortionOptimizedRotationEuler.ToVector3();
-		LocalCellDeformation = Mathf.Clamp(data.LocalCellDeformation, 0f, 1f);
 		BlockSize = Mathf.Max(0.1f, data.BlockSize);
 		UseDebugColors = data.UseDebugColors;
 		CullFacesAgainstNeighborBlocks = data.CullFacesAgainstNeighborBlocks;
@@ -219,10 +213,7 @@ public partial class PlanetVoxelWorld : Node3D
 			HeightVariationInBlocks = HeightVariationInBlocks,
 			NoiseScale = NoiseScale,
 			WorldSeed = WorldSeed,
-			FaceCoordinateUniformity = FaceCoordinateUniformity,
-			PolynomialWarpBias = PolynomialWarpBias,
 			DistortionOptimizedRotationEuler = Vector3Save.FromVector3(DistortionOptimizedRotationEuler),
-			LocalCellDeformation = LocalCellDeformation,
 			BlockSize = BlockSize,
 			UseDebugColors = UseDebugColors,
 			CullFacesAgainstNeighborBlocks = CullFacesAgainstNeighborBlocks,
@@ -241,18 +232,34 @@ public partial class PlanetVoxelWorld : Node3D
 
 		lock (worldDataLock)
 		{
-			if (placedBlocks.TryGetValue(cell, out VoxelBlockType placedType))
-			{
-				return placedType != VoxelBlockType.Air;
-			}
+			return HasBlockUnlocked(cell);
+		}
+	}
 
-			if (removedCells.Contains(cell))
+	public bool TryGetBlockType(PlanetCellId cell, out VoxelBlockType blockType)
+	{
+		blockType = VoxelBlockType.Air;
+		if (!IsValidCell(cell))
+		{
+			return false;
+		}
+
+		lock (worldDataLock)
+		{
+			if (!HasBlockUnlocked(cell))
 			{
 				return false;
 			}
-		}
 
-		return IsDefaultSolid(cell);
+			if (placedBlocks.TryGetValue(cell, out VoxelBlockType placed))
+			{
+				blockType = placed;
+				return true;
+			}
+
+			blockType = GetDefaultBlockTypeUnlocked(cell);
+			return true;
+		}
 	}
 
 	public void PlaceBlock(PlanetCellId cell, VoxelBlockType blockType)
@@ -273,7 +280,7 @@ public partial class PlanetVoxelWorld : Node3D
 			{
 				removedCells.Remove(cell);
 
-				if (IsDefaultSolid(cell) && GetDefaultBlockType(cell) == blockType)
+				if (IsDefaultSolidUnlocked(cell) && GetDefaultBlockTypeUnlocked(cell) == blockType)
 				{
 					placedBlocks.Remove(cell);
 				}
@@ -786,12 +793,7 @@ public partial class PlanetVoxelWorld : Node3D
 		MeshInstance3D meshInstance = new() { Name = "Mesh" };
 		root.AddChild(meshInstance);
 
-		StaticBody3D collisionBody = new()
-		{
-			Name = "Collider",
-			CollisionLayer = 1,
-			CollisionMask = 2
-		};
+		StaticBody3D collisionBody = new() { Name = "Collider" };
 		root.AddChild(collisionBody);
 
 		CollisionShape3D collisionShape = new() { Name = "CollisionShape3D" };
@@ -829,10 +831,7 @@ public partial class PlanetVoxelWorld : Node3D
 					HeightVariationInBlocks,
 					NoiseScale,
 					WorldSeed,
-					FaceCoordinateUniformity,
-					PolynomialWarpBias,
 					DistortionOptimizedRotationEuler,
-					LocalCellDeformation,
 					BlockSize,
 					faceResolution,
 					ChunkSizeInCells,
@@ -1207,12 +1206,12 @@ public partial class PlanetVoxelWorld : Node3D
 
 	private void RemoveBlockInternal(PlanetCellId cell)
 	{
-		if (!HasBlock(cell))
+		if (!HasBlockUnlocked(cell))
 		{
 			return;
 		}
 
-		bool defaultSolid = IsDefaultSolid(cell);
+		bool defaultSolid = IsDefaultSolidUnlocked(cell);
 		if (placedBlocks.ContainsKey(cell))
 		{
 			placedBlocks.Remove(cell);
@@ -1397,18 +1396,23 @@ public partial class PlanetVoxelWorld : Node3D
 	{
 		lock (worldDataLock)
 		{
-			long key = ((long)face << 42) | ((long)u << 21) | (uint)v;
-			if (defaultColumnHeights.TryGetValue(key, out int cached))
-			{
-				return cached;
-			}
-
-			Vector3 direction = GetDirectionForCellCenterStatic(face, u, v, faceResolution);
-			Vector3 rotated = ApplyNoiseRotationStatic(direction, NoiseScale, DistortionOptimizedRotationEuler);
-			int height = Mathf.Max(1, BaseRadiusInBlocks + Mathf.RoundToInt(noise!.GetNoise3D(rotated.X, rotated.Y, rotated.Z) * HeightVariationInBlocks));
-			defaultColumnHeights[key] = height;
-			return height;
+			return GetDefaultColumnHeightUnlocked(face, u, v);
 		}
+	}
+
+	private int GetDefaultColumnHeightUnlocked(int face, int u, int v)
+	{
+		long key = ((long)face << 42) | ((long)u << 21) | (uint)v;
+		if (defaultColumnHeights.TryGetValue(key, out int cached))
+		{
+			return cached;
+		}
+
+		Vector3 direction = GetDirectionForCellCenterStatic(face, u, v, faceResolution);
+		Vector3 rotated = ApplyNoiseRotationStatic(direction, NoiseScale, DistortionOptimizedRotationEuler);
+		int height = Mathf.Max(1, BaseRadiusInBlocks + Mathf.RoundToInt(noise!.GetNoise3D(rotated.X, rotated.Y, rotated.Z) * HeightVariationInBlocks));
+		defaultColumnHeights[key] = height;
+		return height;
 	}
 
 	private static Vector3 GetDirectionForCellCenterStatic(int face, int u, int v, int resolution)
@@ -1452,10 +1456,7 @@ public partial class PlanetVoxelWorld : Node3D
 			HeightVariationInBlocks,
 			NoiseScale,
 			WorldSeed,
-			FaceCoordinateUniformity,
-			PolynomialWarpBias,
 			DistortionOptimizedRotationEuler,
-			LocalCellDeformation,
 			BlockSize,
 			faceResolution,
 			ChunkSizeInCells,
@@ -1479,20 +1480,7 @@ public partial class PlanetVoxelWorld : Node3D
 
 	private static Vector3 GetAdjustedSphericalDirection(int face, float s, float t)
 	{
-		Vector3 cubePoint = GetCubePoint(face, s, t);
-		float x = cubePoint.X;
-		float y = cubePoint.Y;
-		float z = cubePoint.Z;
-		float x2 = x * x;
-		float y2 = y * y;
-		float z2 = z * z;
-
-		Vector3 spherical = new(
-			x * Mathf.Sqrt(Mathf.Max(0f, 1f - 0.5f * y2 - 0.5f * z2 + (y2 * z2) / 3f)),
-			y * Mathf.Sqrt(Mathf.Max(0f, 1f - 0.5f * z2 - 0.5f * x2 + (z2 * x2) / 3f)),
-			z * Mathf.Sqrt(Mathf.Max(0f, 1f - 0.5f * x2 - 0.5f * y2 + (x2 * y2) / 3f)));
-
-		return spherical.Normalized();
+		return GetCubePoint(face, s, t).Normalized();
 	}
 
 	private static Vector3 GetCubePoint(int face, float s, float t)
@@ -1547,14 +1535,34 @@ public partial class PlanetVoxelWorld : Node3D
 		return GetAtlasRectStatic(blockType, atlasUvRects);
 	}
 
-	private bool IsDefaultSolid(PlanetCellId cell)
+	private bool HasBlockUnlocked(PlanetCellId cell)
 	{
-		return cell.Radius < GetDefaultColumnHeight(cell.Face, cell.U, cell.V);
+		if (!IsValidCell(cell))
+		{
+			return false;
+		}
+
+		if (placedBlocks.TryGetValue(cell, out VoxelBlockType placedType))
+		{
+			return placedType != VoxelBlockType.Air;
+		}
+
+		if (removedCells.Contains(cell))
+		{
+			return false;
+		}
+
+		return IsDefaultSolidUnlocked(cell);
 	}
 
-	private VoxelBlockType GetDefaultBlockType(PlanetCellId cell)
+	private bool IsDefaultSolidUnlocked(PlanetCellId cell)
 	{
-		int surfaceRadius = GetDefaultColumnHeight(cell.Face, cell.U, cell.V) - 1;
+		return cell.Radius < GetDefaultColumnHeightUnlocked(cell.Face, cell.U, cell.V);
+	}
+
+	private VoxelBlockType GetDefaultBlockTypeUnlocked(PlanetCellId cell)
+	{
+		int surfaceRadius = GetDefaultColumnHeightUnlocked(cell.Face, cell.U, cell.V) - 1;
 		if (cell.Radius == surfaceRadius)
 		{
 			return VoxelBlockType.Grass;
@@ -1588,10 +1596,7 @@ public partial class PlanetVoxelWorld : Node3D
 		float HeightVariationInBlocks,
 		float NoiseScale,
 		int WorldSeed,
-		float FaceCoordinateUniformity,
-		float PolynomialWarpBias,
 		Vector3 DistortionOptimizedRotationEuler,
-		float LocalCellDeformation,
 		float BlockSize,
 		int FaceResolution,
 		int ChunkSizeInCells,
