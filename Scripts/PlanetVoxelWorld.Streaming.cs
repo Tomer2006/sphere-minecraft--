@@ -41,25 +41,37 @@ public partial class PlanetVoxelWorld
 
 	private void SyncActiveChunks(ChunkAnchor anchor, bool buildImmediately = false)
 	{
-		HashSet<ChunkKey> nextRenderChunks = [];
 		int chunkSize = Mathf.Max(8, ChunkSizeInCells);
-		HashSet<ChunkColumnKey> activeSurfaceChunks = CollectActiveChunkColumns(anchor, chunkSize);
+		int innerR = Mathf.Clamp(ActiveRenderChunkUnloadRadius, 1, 32);
+		int outerR = Mathf.Clamp(ActiveRenderChunkLoadRadius, 1, 32);
+		if (outerR < innerR)
+		{
+			(innerR, outerR) = (outerR, innerR);
+		}
 
-		foreach (ChunkColumnKey surfaceChunk in activeSurfaceChunks)
+		HashSet<ChunkColumnKey> retentionColumns = CollectActiveChunkColumns(anchor, chunkSize, outerR);
+		HashSet<ChunkColumnKey> coreColumns = CollectActiveChunkColumns(anchor, chunkSize, innerR);
+		HashSet<ChunkKey> nextRenderChunks = ExpandColumnsToChunkKeys(retentionColumns, chunkSize);
+		HashSet<ChunkKey> coreChunkKeys = ExpandColumnsToChunkKeys(coreColumns, chunkSize);
+		ApplyChunkSet(nextRenderChunks, coreChunkKeys, retentionColumns, buildImmediately, FormatAnchor(anchor));
+	}
+
+	private HashSet<ChunkKey> ExpandColumnsToChunkKeys(HashSet<ChunkColumnKey> columns, int chunkSize)
+	{
+		HashSet<ChunkKey> keys = [];
+		foreach (ChunkColumnKey surfaceChunk in columns)
 		{
 			int maxRadiusChunk = GetMaxSurfaceRadiusChunkForColumn(surfaceChunk, chunkSize);
-
 			for (int radiusChunk = 0; radiusChunk <= maxRadiusChunk; radiusChunk++)
 			{
-				ChunkKey key = new(surfaceChunk.Face, radiusChunk, surfaceChunk.UChunk, surfaceChunk.VChunk);
-				nextRenderChunks.Add(key);
+				keys.Add(new ChunkKey(surfaceChunk.Face, radiusChunk, surfaceChunk.UChunk, surfaceChunk.VChunk));
 			}
 		}
 
-		ApplyChunkSet(nextRenderChunks, buildImmediately, FormatAnchor(anchor));
+		return keys;
 	}
 
-	private HashSet<ChunkColumnKey> CollectActiveChunkColumns(ChunkAnchor anchor, int chunkSize)
+	private HashSet<ChunkColumnKey> CollectActiveChunkColumns(ChunkAnchor anchor, int chunkSize, int bfsRadius)
 	{
 		ChunkColumnKey start = new(anchor.Face, anchor.U / chunkSize, anchor.V / chunkSize);
 		HashSet<ChunkColumnKey> visited = [start];
@@ -69,7 +81,7 @@ public partial class PlanetVoxelWorld
 		while (frontier.Count > 0)
 		{
 			ChunkColumnSearchState current = frontier.Dequeue();
-			if (current.Distance >= ActiveRenderChunkRadius)
+			if (current.Distance >= bfsRadius)
 			{
 				continue;
 			}
@@ -221,6 +233,8 @@ public partial class PlanetVoxelWorld
 
 	private void ApplyChunkSet(
 		HashSet<ChunkKey> nextRenderChunks,
+		HashSet<ChunkKey> coreChunkKeys,
+		HashSet<ChunkColumnKey> retentionColumns,
 		bool buildImmediately,
 		string scopeLabel)
 	{
@@ -232,10 +246,18 @@ public partial class PlanetVoxelWorld
 		List<ChunkKey> staleActiveChunks = [];
 		foreach (ChunkKey staleKey in activeRenderChunks)
 		{
-			if (!nextRenderChunks.Contains(staleKey))
+			if (coreChunkKeys.Contains(staleKey))
 			{
-				staleActiveChunks.Add(staleKey);
+				continue;
 			}
+
+			ChunkColumnKey col = new(staleKey.Face, staleKey.UChunk, staleKey.VChunk);
+			if (retentionColumns.Contains(col))
+			{
+				continue;
+			}
+
+			staleActiveChunks.Add(staleKey);
 		}
 
 		foreach (ChunkKey staleKey in staleActiveChunks)
@@ -426,7 +448,7 @@ public partial class PlanetVoxelWorld
 		ChunkAnchor anchor = currentAnchor.Value;
 		int anchorUChunk = anchor.U / chunkSize;
 		int anchorVChunk = anchor.V / chunkSize;
-		int facePenalty = key.Face == anchor.Face ? 0 : ActiveRenderChunkRadius + 1;
+		int facePenalty = key.Face == anchor.Face ? 0 : ActiveRenderChunkLoadRadius + 1;
 		return facePenalty + Mathf.Abs(key.UChunk - anchorUChunk) + Mathf.Abs(key.VChunk - anchorVChunk);
 	}
 

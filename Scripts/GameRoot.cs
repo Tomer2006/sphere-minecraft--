@@ -37,6 +37,8 @@ public partial class GameRoot : Node3D
 	{
 		ProcessMode = ProcessModeEnum.Always;
 		RuntimeLog.Info(RuntimeLogChannel.Session, $"GameRoot ready. WorldPath={WorldPath}, PlayerPath={PlayerPath}");
+		GameUserSettings.Load();
+		GameUserSettings.ApplyAudio();
 		BuildLoadingScreen();
 		BuildPauseMenu();
 		CallDeferred(nameof(InitializeSession));
@@ -153,6 +155,8 @@ public partial class GameRoot : Node3D
 
 			UpdateSaveStatus("Created " + SaveGameManager.CurrentSaveName + ". Press F5 to create a save.");
 		}
+
+		GameUserSettings.ApplyToPlayer(player);
 
 		SaveGameManager.PendingLoadSlotId = null;
 		SetPauseMenuVisible(false);

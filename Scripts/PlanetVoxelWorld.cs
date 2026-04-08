@@ -48,7 +48,15 @@ public partial class PlanetVoxelWorld : Node3D
 	[ExportGroup("Chunk Streaming")]
 	[Export(PropertyHint.Range, "8,64,1")] public int ChunkSizeInCells { get; set; } = 24;
 	[Export(PropertyHint.Range, "1,32,1")]
-	public int ActiveRenderChunkRadius { get; set; } = 6;
+	public int ActiveRenderChunkLoadRadius { get; set; } = 5;
+
+	/// <summary>
+	/// Inner streaming ring (smaller than <see cref="ActiveRenderChunkLoadRadius"/>). Chunks whose column
+	/// falls in the outer ring but outside this core are kept loaded until the column leaves the outer ring,
+	/// reducing edge flicker when the player moves slightly on chunk boundaries.
+	/// </summary>
+	[Export(PropertyHint.Range, "1,32,1")]
+	public int ActiveRenderChunkUnloadRadius { get; set; } = 4;
 	[Export(PropertyHint.Range, "2,64,1")] public int SurfaceShellDepthInBlocks { get; set; } = 12;
 	[Export(PropertyHint.Range, "1,12,1")] public int ExtraOutwardBlocks { get; set; } = 2;
 	[ExportGroup("Rendering")]

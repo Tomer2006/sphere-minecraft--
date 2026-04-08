@@ -24,10 +24,21 @@ public partial class MainMenu : Control
 	private SpinBox? worldSeedInput;
 	private Label? createWorldStatusLabel;
 
+	private HSlider? mouseSensitivitySlider;
+	private Label? mouseSensitivityValueLabel;
+	private HSlider? masterVolumeSlider;
+	private Label? masterVolumeValueLabel;
+	private CheckButton? fullscreenCheck;
+	private bool syncingSettingsUi;
+
 	public override void _Ready()
 	{
 		random.Randomize();
 		BuildMenu();
+		GameUserSettings.Load();
+		RefreshSettingsUiFromStore();
+		GameUserSettings.ApplyAudio();
+		GameUserSettings.ApplyWindowMode();
 		ResetNewWorldForm();
 		ShowIntroScreen();
 		RefreshState();
@@ -322,6 +333,15 @@ public partial class MainMenu : Control
 		sectionTitle.AddThemeFontSizeOverride("font_size", 24);
 		parent.AddChild(sectionTitle);
 
+		Label settingsHint = new()
+		{
+			Text = "Changes save automatically and apply when you start or resume a world.",
+			HorizontalAlignment = HorizontalAlignment.Center,
+			AutowrapMode = TextServer.AutowrapMode.WordSmart
+		};
+		settingsHint.AddThemeColorOverride("font_color", new Color(0.78f, 0.84f, 0.88f, 0.82f));
+		parent.AddChild(settingsHint);
+
 		PanelContainer panel = new();
 		panel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
 			new Color(0.10f, 0.13f, 0.18f, 0.90f),
@@ -337,14 +357,58 @@ public partial class MainMenu : Control
 		margin.AddThemeConstantOverride("margin_bottom", 18);
 		panel.AddChild(margin);
 
-		Label settingsHint = new()
+		VBoxContainer formLayout = new();
+		formLayout.AddThemeConstantOverride("separation", 14);
+		margin.AddChild(formLayout);
+
+		mouseSensitivityValueLabel = new Label
 		{
-			Text = "Settings screen placeholder. Add actual settings here next.",
-			HorizontalAlignment = HorizontalAlignment.Center,
-			AutowrapMode = TextServer.AutowrapMode.WordSmart
+			CustomMinimumSize = new Vector2(48f, 0f),
+			HorizontalAlignment = HorizontalAlignment.Right,
+			VerticalAlignment = VerticalAlignment.Center
 		};
-		settingsHint.AddThemeColorOverride("font_color", new Color(0.78f, 0.84f, 0.88f, 0.82f));
-		margin.AddChild(settingsHint);
+		mouseSensitivityValueLabel.AddThemeColorOverride("font_color", new Color(0.84f, 0.91f, 0.94f, 0.92f));
+		mouseSensitivitySlider = new HSlider
+		{
+			MinValue = 0.02,
+			MaxValue = 0.45,
+			Step = 0.01,
+			SizeFlagsHorizontal = SizeFlags.ExpandFill
+		};
+		mouseSensitivitySlider.ValueChanged += OnMouseSensitivitySliderChanged;
+		HBoxContainer mouseRow = new();
+		mouseRow.AddThemeConstantOverride("separation", 10);
+		mouseRow.AddChild(mouseSensitivitySlider);
+		mouseRow.AddChild(mouseSensitivityValueLabel);
+		formLayout.AddChild(CreateFieldBlock("Mouse sensitivity", mouseRow));
+
+		masterVolumeValueLabel = new Label
+		{
+			CustomMinimumSize = new Vector2(44f, 0f),
+			HorizontalAlignment = HorizontalAlignment.Right,
+			VerticalAlignment = VerticalAlignment.Center
+		};
+		masterVolumeValueLabel.AddThemeColorOverride("font_color", new Color(0.84f, 0.91f, 0.94f, 0.92f));
+		masterVolumeSlider = new HSlider
+		{
+			MinValue = 0.0,
+			MaxValue = 1.0,
+			Step = 0.01,
+			SizeFlagsHorizontal = SizeFlags.ExpandFill
+		};
+		masterVolumeSlider.ValueChanged += OnMasterVolumeSliderChanged;
+		HBoxContainer volumeRow = new();
+		volumeRow.AddThemeConstantOverride("separation", 10);
+		volumeRow.AddChild(masterVolumeSlider);
+		volumeRow.AddChild(masterVolumeValueLabel);
+		formLayout.AddChild(CreateFieldBlock("Master volume", volumeRow));
+
+		fullscreenCheck = new CheckButton
+		{
+			Text = "Exclusive fullscreen"
+		};
+		fullscreenCheck.Toggled += OnFullscreenToggled;
+		formLayout.AddChild(CreateFieldBlock("Display", fullscreenCheck));
 
 		HBoxContainer actions = new();
 		actions.AddThemeConstantOverride("separation", 12);
@@ -709,6 +773,86 @@ public partial class MainMenu : Control
 		{
 			subtitleLabel.Text = "Adjust the game options here.";
 		}
+
+		RefreshSettingsUiFromStore();
+	}
+
+	private void RefreshSettingsUiFromStore()
+	{
+		syncingSettingsUi = true;
+		try
+		{
+			if (mouseSensitivitySlider != null)
+			{
+				mouseSensitivitySlider.Value = GameUserSettings.MouseSensitivity;
+			}
+
+			if (masterVolumeSlider != null)
+			{
+				masterVolumeSlider.Value = GameUserSettings.MasterVolumeLinear;
+			}
+
+			if (fullscreenCheck != null)
+			{
+				fullscreenCheck.ButtonPressed = GameUserSettings.Fullscreen;
+			}
+		}
+		finally
+		{
+			syncingSettingsUi = false;
+		}
+
+		UpdateSettingsValueLabels();
+	}
+
+	private void UpdateSettingsValueLabels()
+	{
+		if (mouseSensitivityValueLabel != null && mouseSensitivitySlider != null)
+		{
+			mouseSensitivityValueLabel.Text = $"{mouseSensitivitySlider.Value:0.00}";
+		}
+
+		if (masterVolumeValueLabel != null && masterVolumeSlider != null)
+		{
+			masterVolumeValueLabel.Text = $"{Mathf.RoundToInt((float)masterVolumeSlider.Value * 100f)}%";
+		}
+	}
+
+	private void OnMouseSensitivitySliderChanged(double value)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.MouseSensitivity = (float)value;
+		UpdateSettingsValueLabels();
+		GameUserSettings.Save();
+	}
+
+	private void OnMasterVolumeSliderChanged(double value)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.MasterVolumeLinear = (float)value;
+		UpdateSettingsValueLabels();
+		GameUserSettings.ApplyAudio();
+		GameUserSettings.Save();
+	}
+
+	private void OnFullscreenToggled(bool pressed)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.Fullscreen = pressed;
+		GameUserSettings.ApplyWindowMode();
+		GameUserSettings.Save();
 	}
 
 	private void ShowCreateWorldScreen()
