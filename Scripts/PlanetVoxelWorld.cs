@@ -47,7 +47,6 @@ public partial class PlanetVoxelWorld : Node3D
 
 	[ExportGroup("Chunk Streaming")]
 	[Export(PropertyHint.Range, "8,64,1")] public int ChunkSizeInCells { get; set; } = 24;
-	[Export] public bool AlwaysLoadWholePlanet { get; set; }
 	[Export(PropertyHint.Range, "1,32,1")]
 	public int ActiveRenderChunkRadius { get; set; } = 6;
 	[Export(PropertyHint.Range, "2,64,1")] public int SurfaceShellDepthInBlocks { get; set; } = 12;
@@ -336,7 +335,9 @@ public partial class PlanetVoxelWorld : Node3D
 			$"Rebuilding planet. FaceResolution={faceResolution}, ChunkSize={ChunkSizeInCells}, SurfaceShellDepth={SurfaceShellDepthInBlocks}, ExtraOutwardBlocks={ExtraOutwardBlocks}");
 		ResetInitialChunkLoadState();
 		ClearAllChunks();
-		UpdateStreaming(force: true, buildImmediately: !AlwaysLoadWholePlanet);
+		// Always queue chunk builds after a rebuild. Using buildImmediately here forced every active
+		// chunk through BuildChunkImmediate in one frame, which caused severe hitches on large worlds.
+		UpdateStreaming(force: true, buildImmediately: false);
 	}
 
 	private void EnsureRuntimeNodes()

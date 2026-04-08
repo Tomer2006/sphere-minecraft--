@@ -6,6 +6,12 @@ public partial class GameRoot : Node3D
 {
 	private const string MainMenuScenePath = "res://Scenes/main_menu.tscn";
 
+	/// <summary>
+	/// After chunk generation finishes, keep the loading overlay visible at least this long so it is
+	/// never skipped when <see cref="PlanetVoxelWorld.IsInitialChunkLoadInProgress"/> goes false in the same frame.
+	/// </summary>
+	private const ulong MinWorldEntrySplashVisibleMs = 400;
+
 	[Export] public NodePath WorldPath { get; set; } = new("World");
 	[Export] public NodePath PlayerPath { get; set; } = new("Player");
 
@@ -21,6 +27,8 @@ public partial class GameRoot : Node3D
 	private bool pauseMenuVisible;
 	private bool loadingScreenVisible;
 	private bool pendingPostLoadPlayerPlacement;
+	private bool _worldEntrySplashActive;
+	private ulong _worldEntrySplashReleaseAtMs;
 	private int _agentDbgUpdateLoadingTicks;
 	private int _agentDbgNullWorldTicks;
 	private bool _agentDbgLastSetLoadingVisible;
@@ -90,6 +98,8 @@ public partial class GameRoot : Node3D
 
 		player.SetGameplayEnabled(false);
 		pendingPostLoadPlayerPlacement = true;
+		_worldEntrySplashActive = true;
+		_worldEntrySplashReleaseAtMs = 0;
 		SetLoadingScreenVisible(true);
 		#region agent log
 		AgentDebugLog.Write("B", "GameRoot.cs:InitializeSession", "after SetLoadingScreenVisible(true), scheduling Finish",
@@ -373,25 +383,42 @@ public partial class GameRoot : Node3D
 			return;
 		}
 
-		bool isLoading = world.IsInitialChunkLoadInProgress;
+		bool chunksLoading = world.IsInitialChunkLoadInProgress;
+		if (_worldEntrySplashActive)
+		{
+			if (!chunksLoading)
+			{
+				if (_worldEntrySplashReleaseAtMs == 0)
+				{
+					_worldEntrySplashReleaseAtMs = Time.GetTicksMsec() + MinWorldEntrySplashVisibleMs;
+				}
+				else if (Time.GetTicksMsec() >= _worldEntrySplashReleaseAtMs)
+				{
+					_worldEntrySplashActive = false;
+				}
+			}
+		}
+
+		bool showLoadingOverlay = chunksLoading || _worldEntrySplashActive;
 		#region agent log
 		_agentDbgUpdateLoadingTicks++;
-		if (_agentDbgUpdateLoadingTicks <= 45 || _agentDbgLastSetLoadingVisible != isLoading)
+		if (_agentDbgUpdateLoadingTicks <= 45 || _agentDbgLastSetLoadingVisible != showLoadingOverlay)
 		{
 			AgentDebugLog.Write("A", "GameRoot.cs:UpdateLoadingScreen", "tick",
 				new
 				{
 					tick = _agentDbgUpdateLoadingTicks,
-					isLoading,
+					chunksLoading,
+					showLoadingOverlay,
 					initialTotal = world.InitialChunkLoadTotalCount,
 					layerVisibleBefore = loadingLayer?.Visible ?? false,
 					loadingScreenVisible
 				});
 		}
 
-		_agentDbgLastSetLoadingVisible = isLoading;
+		_agentDbgLastSetLoadingVisible = showLoadingOverlay;
 		#endregion
-		SetLoadingScreenVisible(isLoading);
+		SetLoadingScreenVisible(showLoadingOverlay);
 
 		if (loadingProgressBar != null)
 		{
@@ -409,16 +436,16 @@ public partial class GameRoot : Node3D
 
 		if (player != null)
 		{
-			if (!isLoading && pendingPostLoadPlayerPlacement)
+			if (!chunksLoading && pendingPostLoadPlayerPlacement)
 			{
 				player.PlaceOnPlanetSurfaceTop();
 				pendingPostLoadPlayerPlacement = false;
 			}
 
-			player.SetGameplayEnabled(!isLoading);
+			player.SetGameplayEnabled(!showLoadingOverlay);
 		}
 
-		if (!isLoading && !pauseMenuVisible)
+		if (!showLoadingOverlay && !pauseMenuVisible)
 		{
 			Input.MouseMode = player?.IsInventoryOpen == true
 				? Input.MouseModeEnum.Visible

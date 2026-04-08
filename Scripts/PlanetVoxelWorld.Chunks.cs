@@ -9,9 +9,9 @@ namespace SphereMinecraft;
 
 public partial class PlanetVoxelWorld
 {
-	private const int MaxCompletedBuildsPerFrame = 16;
-	private const int MaxQueuedChunkDispatchesPerFrame = 120;
-	private const int MaxConcurrentChunkBuilds = 64;
+	private const int MaxCompletedBuildsPerFrame = 12;
+	private const int MaxQueuedChunkDispatchesPerFrame = 48;
+	private const int MaxConcurrentChunkBuilds = 32;
 
 	private void InvalidateChunksAround(PlanetCellId editedCell)
 	{
@@ -30,7 +30,7 @@ public partial class PlanetVoxelWorld
 
 		foreach (ChunkKey key in targets)
 		{
-			if (AlwaysLoadWholePlanet || activeRenderChunks.Contains(key))
+			if (activeRenderChunks.Contains(key))
 			{
 				BuildChunkImmediate(key, snapshot);
 			}
@@ -169,17 +169,34 @@ public partial class PlanetVoxelWorld
 
 	private void ApplyCompletedBuilds()
 	{
-		int processed = 0;
-		while (processed < MaxCompletedBuildsPerFrame && completedBuilds.TryDequeue(out ChunkBuildResult result))
+		List<ChunkBuildResult> batch = [];
+		while (completedBuilds.TryDequeue(out ChunkBuildResult result))
 		{
-			processed++;
-			ApplyChunkBuildResult(result);
+			batch.Add(result);
 		}
 
-		if (processed > 0)
+		if (batch.Count == 0)
+		{
+			return;
+		}
+
+		batch.Sort((a, b) => CompareChunkBuildPriority(a.Key, b.Key));
+
+		int toApply = Math.Min(MaxCompletedBuildsPerFrame, batch.Count);
+		for (int i = 0; i < toApply; i++)
+		{
+			ApplyChunkBuildResult(batch[i]);
+		}
+
+		for (int i = toApply; i < batch.Count; i++)
+		{
+			completedBuilds.Enqueue(batch[i]);
+		}
+
+		if (toApply > 0)
 		{
 			RuntimeLog.Info(RuntimeLogChannel.Chunk,
-				$"Applied {processed} completed chunk build(s) this frame. RemainingQueued={completedBuilds.Count}");
+				$"Applied {toApply} completed chunk build(s) this frame (near-player first). RemainingQueued={completedBuilds.Count}");
 		}
 	}
 

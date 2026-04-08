@@ -7,18 +7,6 @@ public partial class PlanetVoxelWorld
 {
 	private void UpdateStreaming(bool force = false, bool buildImmediately = false)
 	{
-		if (AlwaysLoadWholePlanet)
-		{
-			bool hasMissingCollision = HasLoadedChunkWithoutCollision();
-			if (!force && activeRenderChunks.Count > 0 && !hasMissingCollision)
-			{
-				return;
-			}
-
-			SyncAllChunks(buildImmediately || hasMissingCollision);
-			return;
-		}
-
 		trackedPlayer ??= ResolvePlayer();
 		if (trackedPlayer == null)
 		{
@@ -49,30 +37,6 @@ public partial class PlanetVoxelWorld
 		RuntimeLog.Info(RuntimeLogChannel.World,
 			$"Streaming anchor updated to {FormatAnchor(nextAnchor)} from player position {RuntimeLog.FormatVector(trackedPlayer.GlobalPosition)}. Force={force}, BuildImmediately={buildImmediately}");
 		SyncActiveChunks(nextAnchor, buildImmediately);
-	}
-
-	private void SyncAllChunks(bool buildImmediately = false)
-	{
-		HashSet<ChunkKey> nextRenderChunks = [];
-		int chunkSize = Mathf.Max(8, ChunkSizeInCells);
-		int faceChunkCount = Mathf.CeilToInt(faceResolution / (float)chunkSize);
-		int maxRadiusChunk = GetMaxPlanetRadiusChunk(chunkSize);
-
-		for (int face = 0; face < FaceNormals.Length; face++)
-		{
-			for (int uChunk = 0; uChunk < faceChunkCount; uChunk++)
-			{
-				for (int vChunk = 0; vChunk < faceChunkCount; vChunk++)
-				{
-					for (int radiusChunk = 0; radiusChunk <= maxRadiusChunk; radiusChunk++)
-					{
-						nextRenderChunks.Add(new ChunkKey(face, radiusChunk, uChunk, vChunk));
-					}
-				}
-			}
-		}
-
-		ApplyChunkSet(nextRenderChunks, buildImmediately, "all-planet");
 	}
 
 	private void SyncActiveChunks(ChunkAnchor anchor, bool buildImmediately = false)
@@ -246,27 +210,13 @@ public partial class PlanetVoxelWorld
 		}
 	}
 
-	private int GetMaxSurfaceRadiusChunkForColumn(ChunkColumnKey key, int chunkSize)
+	private int GetMaxSurfaceRadiusChunkForColumn(ChunkColumnKey _, int chunkSize)
 	{
-		int uStart = key.UChunk * chunkSize;
-		int uEnd = Mathf.Min(faceResolution, uStart + chunkSize);
-		int vStart = key.VChunk * chunkSize;
-		int vEnd = Mathf.Min(faceResolution, vStart + chunkSize);
-		int maxSurfaceHeight = 1;
-
-		lock (worldDataLock)
-		{
-			for (int u = uStart; u < uEnd; u++)
-			{
-				for (int v = vStart; v < vEnd; v++)
-				{
-					maxSurfaceHeight = Mathf.Max(maxSurfaceHeight, GetDefaultColumnHeightUnlocked(key.Face, u, v));
-				}
-			}
-		}
-
-		int maxRadiusExclusive = maxSurfaceHeight + ExtraOutwardBlocks;
-		return Mathf.Max(0, Mathf.Max(0, maxRadiusExclusive - 1) / chunkSize);
+		// Per-column (u,v) sampling called GetDefaultColumnHeightUnlocked for every surface cell in the
+		// footprint while holding worldDataLock — tens of thousands of noise lookups on large streams.
+		// The planet-wide bound matches the same formula used for full-planet sync and is safe here
+		// because the old loop only consulted default heights (not player-placed towers).
+		return GetMaxPlanetRadiusChunk(chunkSize);
 	}
 
 	private void ApplyChunkSet(
@@ -348,7 +298,7 @@ public partial class PlanetVoxelWorld
 		}
 
 		RuntimeLog.Info(RuntimeLogChannel.Chunk,
-			$"Chunk sync complete for {scopeLabel}. Chunks={nextRenderChunks.Count}, QueuedOrBuilt={addedChunkCount}, Destroyed={staleChunkCount}, BuildImmediately={buildImmediately}, AlwaysLoadWholePlanet={AlwaysLoadWholePlanet}");
+			$"Chunk sync complete for {scopeLabel}. Chunks={nextRenderChunks.Count}, QueuedOrBuilt={addedChunkCount}, Destroyed={staleChunkCount}, BuildImmediately={buildImmediately}");
 	}
 
 	private HashSet<ChunkKey> PruneQueuedChunkBuilds(HashSet<ChunkKey> activeChunkKeys)
@@ -435,25 +385,34 @@ public partial class PlanetVoxelWorld
 
 	private float GetChunkPriorityDistanceSquared(ChunkKey key)
 	{
-		if (trackedPlayer == null)
+		// ApplyCompletedBuilds runs before UpdateStreaming each frame, so trackedPlayer is often still
+		// null unless we resolve here. Without a real distance every chunk ties at 0 and order is random.
+		trackedPlayer ??= ResolvePlayer();
+		if (trackedPlayer != null)
 		{
-			return 0f;
+			int chunkSize = Mathf.Max(8, ChunkSizeInCells);
+			int uStart = key.UChunk * chunkSize;
+			int vStart = key.VChunk * chunkSize;
+			int uSpan = Mathf.Min(chunkSize, faceResolution - uStart);
+			int vSpan = Mathf.Min(chunkSize, faceResolution - vStart);
+			float uCenter = uStart + uSpan * 0.5f;
+			float vCenter = vStart + vSpan * 0.5f;
+			float radiusCenter = key.RadiusChunk * chunkSize + chunkSize * 0.5f;
+			Vector3 chunkCenter = NormalizedCubeDirection(
+				key.Face,
+				GetRawFaceCoordinateStatic(uCenter, faceResolution),
+				GetRawFaceCoordinateStatic(vCenter, faceResolution)) * (radiusCenter * BlockSize);
+			Vector3 playerLocal = trackedPlayer.GlobalPosition - PlanetCenter;
+			return playerLocal.DistanceSquaredTo(chunkCenter);
 		}
 
-		int chunkSize = Mathf.Max(8, ChunkSizeInCells);
-		int uStart = key.UChunk * chunkSize;
-		int vStart = key.VChunk * chunkSize;
-		int uSpan = Mathf.Min(chunkSize, faceResolution - uStart);
-		int vSpan = Mathf.Min(chunkSize, faceResolution - vStart);
-		float uCenter = uStart + uSpan * 0.5f;
-		float vCenter = vStart + vSpan * 0.5f;
-		float radiusCenter = key.RadiusChunk * chunkSize + chunkSize * 0.5f;
-		Vector3 chunkCenter = NormalizedCubeDirection(
-			key.Face,
-			GetRawFaceCoordinateStatic(uCenter, faceResolution),
-			GetRawFaceCoordinateStatic(vCenter, faceResolution)) * (radiusCenter * BlockSize);
-		Vector3 playerLocal = trackedPlayer.GlobalPosition - PlanetCenter;
-		return playerLocal.DistanceSquaredTo(chunkCenter);
+		if (currentAnchor.HasValue)
+		{
+			int columnSteps = GetApproximateChunkColumnDistance(key);
+			return (float)(columnSteps * columnSteps);
+		}
+
+		return 0f;
 	}
 
 	private int GetApproximateChunkColumnDistance(ChunkKey key)
@@ -527,25 +486,5 @@ public partial class PlanetVoxelWorld
 	{
 		int maxRadiusExclusive = Mathf.CeilToInt(BaseRadiusInBlocks + HeightVariationInBlocks) + ExtraOutwardBlocks;
 		return Mathf.Max(0, Mathf.Max(0, maxRadiusExclusive - 1) / chunkSize);
-	}
-
-	private bool HasLoadedChunkWithoutCollision()
-	{
-		foreach (PlanetChunk chunk in chunks.Values)
-		{
-			if (chunk.MeshInstance.Mesh == null)
-			{
-				continue;
-			}
-
-			if (chunk.CollisionShape.Shape == null)
-			{
-				RuntimeLog.Warning(RuntimeLogChannel.Chunk,
-					$"Detected loaded chunk without collision in always-load mode: {FormatChunkKey(chunk.Key)}");
-				return true;
-			}
-		}
-
-		return false;
 	}
 }
