@@ -83,6 +83,17 @@ public partial class PlanetPlayer : CharacterBody3D
 	private VoxelBlockType carriedBlockType = VoxelBlockType.Air;
 	private int carriedBlockCount;
 
+	private bool flyMode;
+	private bool noClipMode;
+	private float flySpeed = 20f;
+	private float flyFastMultiplier = 3f;
+
+	private bool chatOpen;
+	private LineEdit? chatInput;
+	private VBoxContainer? chatMessageContainer;
+	private PanelContainer? chatPanel;
+	private readonly List<string> chatHistory = [];
+
 	[ExportGroup("References")]
 	[Export]
 	public NodePath WorldPath
@@ -307,6 +318,16 @@ public partial class PlanetPlayer : CharacterBody3D
 			return;
 		}
 
+		if (chatOpen)
+		{
+			if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape })
+			{
+				CloseChat();
+				GetViewport().SetInputAsHandled();
+			}
+			return;
+		}
+
 		if (@event is InputEventMouseMotion mouseMotion && Input.MouseMode == Input.MouseModeEnum.Captured)
 		{
 			lookInput += mouseMotion.Relative;
@@ -340,9 +361,21 @@ public partial class PlanetPlayer : CharacterBody3D
 			case Key.Escape:
 				escapePressedThisFrame = true;
 				break;
-			case Key.E:
-				inventoryTogglePressedThisFrame = true;
-				break;
+		case Key.E:
+			inventoryTogglePressedThisFrame = true;
+			break;
+		case Key.T:
+			if (!chatOpen)
+			{
+				OpenChat();
+			}
+			break;
+		case Key.Slash:
+			if (!chatOpen)
+			{
+				OpenChat("/");
+			}
+			break;
 			case Key.Key1:
 				pendingHotbarSelection = 0;
 				break;
@@ -530,9 +563,9 @@ public partial class PlanetPlayer : CharacterBody3D
 
 		HandleCursorLock();
 		HandleHotbarSelection();
-		moveInput = inventoryOpen ? Vector2.Zero : ReadMoveInput();
+		moveInput = (inventoryOpen || chatOpen) ? Vector2.Zero : ReadMoveInput();
 
-		if (inventoryOpen)
+		if (inventoryOpen || chatOpen)
 		{
 			return;
 		}
@@ -542,7 +575,6 @@ public partial class PlanetPlayer : CharacterBody3D
 			HandleLook();
 			HandleBlockInput();
 		}
-
 	}
 
 	private void FixedUpdate(float deltaTime)
@@ -769,6 +801,12 @@ public partial class PlanetPlayer : CharacterBody3D
 
 	private void SimulateBody(Vector3 upAxis, float deltaTime, bool wasGrounded)
 	{
+		if (flyMode)
+		{
+			SimulateFly(upAxis, deltaTime);
+			return;
+		}
+
 		Vector3 velocity = Velocity;
 		Vector3 groundNormal = wasGrounded ? GetFloorNormal() : upAxis;
 		if (groundNormal.LengthSquared() < 0.0001f || groundNormal.Dot(upAxis) < groundMinDot)
@@ -825,6 +863,53 @@ public partial class PlanetPlayer : CharacterBody3D
 			{
 				Velocity = Velocity.Slide(resolvedFloorNormal);
 			}
+		}
+	}
+
+	private void SimulateFly(Vector3 upAxis, float deltaTime)
+	{
+		Vector3 forward = desiredForward.Slide(upAxis).Normalized();
+		if (forward.LengthSquared() < 0.001f)
+		{
+			forward = (-GlobalTransform.Basis.Z).Slide(upAxis).Normalized();
+		}
+
+		Vector3 right = forward.Cross(upAxis).Normalized();
+
+		Vector3 cameraForward = cameraPivot != null
+			? -cameraPivot.GlobalTransform.Basis.Z
+			: forward;
+
+		Vector3 wishDir = cameraForward * moveInput.Y + right * moveInput.X;
+
+		float verticalInput = 0f;
+		if (Input.IsActionPressed("jump"))
+		{
+			verticalInput += 1f;
+		}
+		if (Input.IsActionPressed("move_backward") && Input.IsKeyPressed(Key.Shift))
+		{
+			verticalInput -= 1f;
+		}
+
+		wishDir += upAxis * verticalInput;
+
+		if (wishDir.LengthSquared() > 1f)
+		{
+			wishDir = wishDir.Normalized();
+		}
+
+		float speed = flySpeed * (Input.IsKeyPressed(Key.Ctrl) ? flyFastMultiplier : 1f);
+
+		if (noClipMode)
+		{
+			GlobalPosition += wishDir * speed * deltaTime;
+			Velocity = Vector3.Zero;
+		}
+		else
+		{
+			Velocity = wishDir * speed;
+			MoveAndSlide();
 		}
 	}
 
@@ -1359,7 +1444,68 @@ public partial class PlanetPlayer : CharacterBody3D
 			root.AddChild(crosshairVertical);
 		}
 
+		BuildChatUi(root);
 		UpdateHudVisibility();
+	}
+
+	private void BuildChatUi(Control root)
+	{
+		chatPanel = root.GetNodeOrNull<PanelContainer>("ChatPanel");
+		if (chatPanel != null)
+		{
+			chatInput = chatPanel.FindChild("ChatInput", true, false) as LineEdit;
+			chatMessageContainer = chatPanel.FindChild("ChatMessages", true, false) as VBoxContainer;
+			return;
+		}
+
+		chatPanel = new PanelContainer
+		{
+			Name = "ChatPanel",
+			Visible = false,
+			CustomMinimumSize = new Vector2(480f, 220f),
+			MouseFilter = Control.MouseFilterEnum.Pass
+		};
+		chatPanel.AddThemeStyleboxOverride("panel", CreatePanelStyle(new Color(0.02f, 0.02f, 0.04f, 0.88f), new Color(0.35f, 0.40f, 0.48f, 0.90f), 2));
+		root.AddChild(chatPanel);
+
+		MarginContainer chatMargin = new() { MouseFilter = Control.MouseFilterEnum.Pass };
+		chatMargin.AddThemeConstantOverride("margin_left", 12);
+		chatMargin.AddThemeConstantOverride("margin_top", 10);
+		chatMargin.AddThemeConstantOverride("margin_right", 12);
+		chatMargin.AddThemeConstantOverride("margin_bottom", 10);
+		chatPanel.AddChild(chatMargin);
+
+		VBoxContainer chatLayout = new() { MouseFilter = Control.MouseFilterEnum.Pass };
+		chatLayout.AddThemeConstantOverride("separation", 6);
+		chatMargin.AddChild(chatLayout);
+
+		ScrollContainer scroll = new()
+		{
+			Name = "ChatScroll",
+			SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+			MouseFilter = Control.MouseFilterEnum.Ignore
+		};
+		chatLayout.AddChild(scroll);
+
+		chatMessageContainer = new VBoxContainer
+		{
+			Name = "ChatMessages",
+			SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+			MouseFilter = Control.MouseFilterEnum.Ignore
+		};
+		chatMessageContainer.AddThemeConstantOverride("separation", 2);
+		scroll.AddChild(chatMessageContainer);
+
+		chatInput = new LineEdit
+		{
+			Name = "ChatInput",
+			PlaceholderText = "Type a command...",
+			CustomMinimumSize = new Vector2(0f, 32f),
+			MouseFilter = Control.MouseFilterEnum.Stop
+		};
+		chatInput.AddThemeFontSizeOverride("font_size", 16);
+		chatInput.TextSubmitted += OnChatSubmitted;
+		chatLayout.AddChild(chatInput);
 	}
 
 	private void UpdateHud()
@@ -1381,6 +1527,11 @@ public partial class PlanetPlayer : CharacterBody3D
 			hotbarContainer.Position = new Vector2(
 				Mathf.Max(16f, center.X - hotbarWidth * 0.5f),
 				viewportSize.Y - 102f);
+		}
+
+		if (chatPanel != null)
+		{
+			chatPanel.Position = new Vector2(16f, viewportSize.Y - 220f - 120f);
 		}
 
 		UpdateHotbarUi();
@@ -1709,6 +1860,135 @@ public partial class PlanetPlayer : CharacterBody3D
 			VoxelBlockType.Stone => new Color(0.33f, 0.36f, 0.40f, 0.96f),
 			_ => new Color(0.11f, 0.13f, 0.16f, 0.94f)
 		};
+	}
+
+	private void OpenChat(string prefill = "")
+	{
+		if (chatOpen || inventoryOpen)
+		{
+			return;
+		}
+
+		chatOpen = true;
+		if (chatPanel != null)
+		{
+			chatPanel.Visible = true;
+		}
+
+		if (chatInput != null)
+		{
+			chatInput.Text = prefill;
+			chatInput.GrabFocus();
+			chatInput.CaretColumn = prefill.Length;
+		}
+
+		SetCursorLock(false);
+	}
+
+	private void CloseChat()
+	{
+		chatOpen = false;
+		if (chatPanel != null)
+		{
+			chatPanel.Visible = false;
+		}
+
+		if (chatInput != null)
+		{
+			chatInput.ReleaseFocus();
+			chatInput.Text = string.Empty;
+		}
+
+		if (gameplayEnabled)
+		{
+			SetCursorLock(true);
+		}
+	}
+
+	private void OnChatSubmitted(string text)
+	{
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			CloseChat();
+			return;
+		}
+
+		AddChatMessage($"> {text}");
+
+		if (text.StartsWith('/'))
+		{
+			ExecuteChatCommand(text.TrimStart('/').Trim().ToLowerInvariant());
+		}
+		else
+		{
+			AddChatMessage("Unknown input. Use /fly or /noclip.");
+		}
+
+		CloseChat();
+	}
+
+	private void ExecuteChatCommand(string command)
+	{
+		switch (command)
+		{
+			case "fly":
+				flyMode = !flyMode;
+				if (!flyMode)
+				{
+					noClipMode = false;
+					SetCollisionEnabled(true);
+				}
+				AddChatMessage(flyMode ? "Fly mode enabled." : "Fly mode disabled.");
+				RuntimeLog.Info(RuntimeLogChannel.Player, $"Fly mode toggled to {flyMode}.");
+				break;
+			case "noclip":
+				noClipMode = !noClipMode;
+				if (noClipMode)
+				{
+					flyMode = true;
+				}
+				SetCollisionEnabled(!noClipMode);
+				AddChatMessage(noClipMode ? "Noclip enabled. (fly + no collision)" : "Noclip disabled.");
+				RuntimeLog.Info(RuntimeLogChannel.Player, $"Noclip mode toggled to {noClipMode}.");
+				break;
+			default:
+				AddChatMessage($"Unknown command: /{command}");
+				AddChatMessage("Available: /fly, /noclip");
+				break;
+		}
+	}
+
+	private void SetCollisionEnabled(bool enabled)
+	{
+		EnsureCapsule();
+		if (capsule != null)
+		{
+			capsule.Disabled = !enabled;
+		}
+	}
+
+	private void AddChatMessage(string message)
+	{
+		chatHistory.Add(message);
+		if (chatMessageContainer == null)
+		{
+			return;
+		}
+
+		Label label = new()
+		{
+			Text = message,
+			AutowrapMode = TextServer.AutowrapMode.WordSmart,
+			MouseFilter = Control.MouseFilterEnum.Ignore
+		};
+		label.AddThemeFontSizeOverride("font_size", 14);
+		label.AddThemeColorOverride("font_color", new Color(0.85f, 0.90f, 0.95f));
+		chatMessageContainer.AddChild(label);
+
+		while (chatMessageContainer.GetChildCount() > 50)
+		{
+			chatMessageContainer.GetChild(0).QueueFree();
+		}
 	}
 
 	private void ClearFrameInput()

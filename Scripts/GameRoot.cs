@@ -21,6 +21,9 @@ public partial class GameRoot : Node3D
 	private bool pauseMenuVisible;
 	private bool loadingScreenVisible;
 	private bool pendingPostLoadPlayerPlacement;
+	private int _agentDbgUpdateLoadingTicks;
+	private int _agentDbgNullWorldTicks;
+	private bool _agentDbgLastSetLoadingVisible;
 
 	public override void _Ready()
 	{
@@ -88,6 +91,30 @@ public partial class GameRoot : Node3D
 		player.SetGameplayEnabled(false);
 		pendingPostLoadPlayerPlacement = true;
 		SetLoadingScreenVisible(true);
+		#region agent log
+		AgentDebugLog.Write("B", "GameRoot.cs:InitializeSession", "after SetLoadingScreenVisible(true), scheduling Finish",
+			new { loadingLayerVisible = loadingLayer?.Visible ?? false, loadingScreenVisible });
+		#endregion
+		CallDeferred(nameof(FinishInitializeSession));
+	}
+
+	private void FinishInitializeSession()
+	{
+		if (world is null || player is null)
+		{
+			return;
+		}
+
+		#region agent log
+		AgentDebugLog.Write("B", "GameRoot.cs:FinishInitializeSession", "enter",
+			new
+			{
+				beforeLoad = true,
+				isInitialChunkLoadInProgress = world.IsInitialChunkLoadInProgress,
+				initialTotal = world.InitialChunkLoadTotalCount,
+				loadingLayerVisible = loadingLayer?.Visible ?? false
+			});
+		#endregion
 
 		if (!string.IsNullOrWhiteSpace(SaveGameManager.PendingLoadSlotId) &&
 			SaveGameManager.TryLoadGame(SaveGameManager.PendingLoadSlotId!, out SaveGameData? saveData) &&
@@ -119,7 +146,25 @@ public partial class GameRoot : Node3D
 
 		SaveGameManager.PendingLoadSlotId = null;
 		SetPauseMenuVisible(false);
+		#region agent log
+		AgentDebugLog.Write("A", "GameRoot.cs:FinishInitializeSession", "before UpdateLoadingScreen after load",
+			new
+			{
+				isInitialChunkLoadInProgress = world.IsInitialChunkLoadInProgress,
+				initialTotal = world.InitialChunkLoadTotalCount,
+				loadingLayerVisible = loadingLayer?.Visible ?? false
+			});
+		#endregion
 		UpdateLoadingScreen();
+		#region agent log
+		AgentDebugLog.Write("A", "GameRoot.cs:FinishInitializeSession", "after UpdateLoadingScreen",
+			new
+			{
+				isInitialChunkLoadInProgress = world.IsInitialChunkLoadInProgress,
+				loadingLayerVisible = loadingLayer?.Visible ?? false,
+				loadingScreenVisible
+			});
+		#endregion
 	}
 
 	private void BuildLoadingScreen()
@@ -127,7 +172,7 @@ public partial class GameRoot : Node3D
 		loadingLayer = new CanvasLayer
 		{
 			Name = "LoadingScreen",
-			Visible = true,
+			Visible = false,
 			ProcessMode = ProcessModeEnum.Always
 		};
 		AddChild(loadingLayer);
@@ -193,6 +238,10 @@ public partial class GameRoot : Node3D
 			CustomMinimumSize = new Vector2(360f, 20f)
 		};
 		layout.AddChild(loadingProgressBar);
+		#region agent log
+		AgentDebugLog.Write("D", "GameRoot.cs:BuildLoadingScreen", "loading layer created",
+			new { layer = loadingLayer?.Name, visible = loadingLayer?.Visible, layerValue = loadingLayer?.Layer });
+		#endregion
 	}
 
 	private void BuildPauseMenu()
@@ -312,10 +361,36 @@ public partial class GameRoot : Node3D
 	{
 		if (world == null)
 		{
+			#region agent log
+			_agentDbgNullWorldTicks++;
+			if (_agentDbgNullWorldTicks <= 12)
+			{
+				AgentDebugLog.Write("E", "GameRoot.cs:UpdateLoadingScreen", "world null early return",
+					new { tick = _agentDbgNullWorldTicks });
+			}
+
+			#endregion
 			return;
 		}
 
 		bool isLoading = world.IsInitialChunkLoadInProgress;
+		#region agent log
+		_agentDbgUpdateLoadingTicks++;
+		if (_agentDbgUpdateLoadingTicks <= 45 || _agentDbgLastSetLoadingVisible != isLoading)
+		{
+			AgentDebugLog.Write("A", "GameRoot.cs:UpdateLoadingScreen", "tick",
+				new
+				{
+					tick = _agentDbgUpdateLoadingTicks,
+					isLoading,
+					initialTotal = world.InitialChunkLoadTotalCount,
+					layerVisibleBefore = loadingLayer?.Visible ?? false,
+					loadingScreenVisible
+				});
+		}
+
+		_agentDbgLastSetLoadingVisible = isLoading;
+		#endregion
 		SetLoadingScreenVisible(isLoading);
 
 		if (loadingProgressBar != null)
@@ -353,6 +428,13 @@ public partial class GameRoot : Node3D
 
 	private void SetLoadingScreenVisible(bool visible)
 	{
+		#region agent log
+		if (loadingScreenVisible != visible)
+		{
+			AgentDebugLog.Write("D", "GameRoot.cs:SetLoadingScreenVisible", "visibility change",
+				new { visible, layerWasVisible = loadingLayer?.Visible ?? false });
+		}
+		#endregion
 		loadingScreenVisible = visible;
 		if (loadingLayer != null)
 		{

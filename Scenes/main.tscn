@@ -19,12 +19,11 @@ sky_material = SubResource("ProceduralSkyMaterial_sky")
 background_mode = 2
 sky = SubResource("Sky_main")
 ambient_light_source = 3
-ambient_light_color = Color(0.96, 0.92, 0.84, 1)
-ambient_light_sky_contribution = 0.42
-ambient_light_energy = 0.48
+ambient_light_color = Color(0.08, 0.09, 0.12, 1)
+ambient_light_sky_contribution = 0.08
+ambient_light_energy = 0.5
 reflected_light_source = 1
 tonemap_mode = 3
-tonemap_exposure = 1.0
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_8gbba"]
 radius = 0.45
@@ -38,28 +37,26 @@ environment = SubResource("Environment_q2ekf")
 
 [node name="World" type="Node3D" parent="." unique_id=1281627882]
 script = ExtResource("1_a4wja")
+WorldSeed = 1
 
 [node name="Player" type="CharacterBody3D" parent="." unique_id=2124311118]
-collision_layer = 2
+collision_layer = 3
+collision_mask = 3
 input_ray_pickable = false
 slide_on_ceiling = false
 script = ExtResource("2_hpj0g")
 SpawnHeightOffset = 4.0
-CapsuleRadius = 0.25
+CapsuleRadius = 0.1
 GroundMinDot = 0.3
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=1353951316]
 shape = SubResource("CapsuleShape3D_8gbba")
 debug_fill = false
 
-[node name="Sun" type="DirectionalLight3D" parent="." unique_id=437352155]
-transform = Transform3D(0.20035353, -0.9125347, 0.35656542, -0.6710101, 0.13737369, 0.728611, -0.7138655, -0.38523877, -0.58479667, 0, 723.88416, 0)
-light_color = Color(1, 0.95, 0.86, 1)
-light_energy = 2.0
-light_indirect_energy = 1.2
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=1800849018]
+transform = Transform3D(0.57357645, -0.52654076, 0.62750685, 0, 0.76604444, 0.6427876, -0.81915206, -0.3686878, 0.43938506, 0, 0, 0)
 shadow_enabled = true
 shadow_bias = 0.005
 shadow_normal_bias = 0.05
 directional_shadow_mode = 1
-directional_shadow_blend_splits = true
-sky_mode = 1
+directional_shadow_max_distance = 7673.0
