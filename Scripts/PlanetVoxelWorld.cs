@@ -83,6 +83,14 @@ public partial class PlanetVoxelWorld : Node3D
 
 	public int InitialChunkLoadTotalCount => initialLoadTargetChunkCount;
 
+	/// <summary>Diagnostics for debug HUD (F3).</summary>
+	public int DebugLoadedChunkCount => chunks.Count;
+
+	public int DebugActiveRenderChunkCount => activeRenderChunks.Count;
+	public int DebugQueuedChunkBuildCount => queuedChunkBuilds.Count;
+	public int DebugFaceResolutionCells => faceResolution;
+	public int DebugStreamingRadiusChunk => lastStreamingPlayerRadiusChunk;
+
 	public override void _Ready()
 	{
 		EnsureRuntimeNodes();

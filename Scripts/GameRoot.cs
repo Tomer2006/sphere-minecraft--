@@ -1,3 +1,4 @@
+using System.Text;
 using Godot;
 
 namespace SphereMinecraft;
@@ -33,6 +34,14 @@ public partial class GameRoot : Node3D
 	private int _agentDbgNullWorldTicks;
 	private bool _agentDbgLastSetLoadingVisible;
 
+	private CanvasLayer? technicalDebugHudLayer;
+	private Label? technicalDebugHudLabel;
+	private bool technicalDebugHudVisible;
+	private readonly StringBuilder technicalDebugHudBuilder = new(1024);
+	private float technicalDebugFpsSmoothed;
+	private int technicalDebugFpsFrameCount;
+	private float technicalDebugFpsAccum;
+
 	public override void _Ready()
 	{
 		ProcessMode = ProcessModeEnum.Always;
@@ -42,16 +51,31 @@ public partial class GameRoot : Node3D
 		GameUserSettings.ApplyGraphics();
 		BuildLoadingScreen();
 		BuildPauseMenu();
+		BuildTechnicalDebugHud();
 		CallDeferred(nameof(InitializeSession));
 	}
 
 	public override void _Process(double delta)
 	{
+		float dt = (float)delta;
 		UpdateLoadingScreen();
+		UpdateTechnicalDebugHud(dt);
 	}
 
 	public override void _Input(InputEvent @event)
 	{
+		if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.F3 })
+		{
+			technicalDebugHudVisible = !technicalDebugHudVisible;
+			if (technicalDebugHudLayer != null)
+			{
+				technicalDebugHudLayer.Visible = technicalDebugHudVisible;
+			}
+
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
 		if (@event is not InputEventKey keyEvent || !keyEvent.Pressed || keyEvent.Echo)
 		{
 			return;
@@ -344,6 +368,115 @@ public partial class GameRoot : Node3D
 			HorizontalAlignment = HorizontalAlignment.Center
 		};
 		layout.AddChild(saveStatusLabel);
+	}
+
+	private void BuildTechnicalDebugHud()
+	{
+		technicalDebugHudLayer = new CanvasLayer
+		{
+			Name = "TechnicalDebugHud",
+			Visible = false,
+			Layer = 120,
+			ProcessMode = ProcessModeEnum.Always
+		};
+		AddChild(technicalDebugHudLayer);
+
+		PanelContainer panel = new()
+		{
+			Name = "TechnicalDebugPanel",
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			AnchorLeft = 0f,
+			AnchorTop = 0f,
+			OffsetLeft = 12f,
+			OffsetTop = 12f,
+			OffsetRight = 420f,
+			OffsetBottom = 420f
+		};
+		panel.AddThemeStyleboxOverride("panel", new StyleBoxFlat
+		{
+			BgColor = new Color(0.02f, 0.04f, 0.06f, 0.78f),
+			BorderColor = new Color(0.25f, 0.45f, 0.55f, 0.5f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+			CornerRadiusTopLeft = 6,
+			CornerRadiusTopRight = 6,
+			CornerRadiusBottomRight = 6,
+			CornerRadiusBottomLeft = 6,
+			ContentMarginLeft = 10,
+			ContentMarginTop = 8,
+			ContentMarginRight = 10,
+			ContentMarginBottom = 8
+		});
+		technicalDebugHudLayer.AddChild(panel);
+
+		technicalDebugHudLabel = new Label
+		{
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			AutowrapMode = TextServer.AutowrapMode.Off
+		};
+		technicalDebugHudLabel.AddThemeColorOverride("font_color", new Color(0.88f, 0.94f, 0.98f, 1f));
+		technicalDebugHudLabel.AddThemeFontSizeOverride("font_size", 13);
+		panel.AddChild(technicalDebugHudLabel);
+	}
+
+	private void UpdateTechnicalDebugHud(float delta)
+	{
+		if (!technicalDebugHudVisible || technicalDebugHudLabel == null)
+		{
+			return;
+		}
+
+		if (delta > 1e-6f)
+		{
+			technicalDebugFpsAccum += 1f / delta;
+			technicalDebugFpsFrameCount++;
+			if (technicalDebugFpsFrameCount >= 20)
+			{
+				technicalDebugFpsSmoothed = technicalDebugFpsAccum / technicalDebugFpsFrameCount;
+				technicalDebugFpsAccum = 0f;
+				technicalDebugFpsFrameCount = 0;
+			}
+		}
+
+		StringBuilder b = technicalDebugHudBuilder;
+		b.Clear();
+		b.AppendLine("Sphere Minecraft — F3 technical");
+		b.AppendLine(
+			$"FPS (~20 fr avg): {(technicalDebugFpsSmoothed > 0.5f ? technicalDebugFpsSmoothed : 1f / Mathf.Max(delta, 1e-4f)):F1}  Frame ms: {delta * 1000f:F2}");
+		b.AppendLine($"Process frame: {Engine.GetProcessFrames()}");
+		Viewport vp = GetViewport();
+		b.AppendLine($"MSAA 3D: {vp.Msaa3D}  SSAA: {vp.ScreenSpaceAA}  TAA: {vp.UseTaa}");
+		Vector2I win = DisplayServer.WindowGetSize();
+		b.AppendLine($"Window: {win.X}×{win.Y}  Paused: {GetTree().Paused}  Loading: {loadingScreenVisible}");
+
+		if (world != null)
+		{
+			b.AppendLine("--- World ---");
+			b.AppendLine($"Seed: {world.WorldSeed}  Base R: {world.BaseRadiusInBlocks}  H±: {world.HeightVariationInBlocks:F2}");
+			b.AppendLine($"Block: {world.BlockSize:F2}  Chunk cells: {world.ChunkSizeInCells}  Face res: {world.DebugFaceResolutionCells}");
+			b.AppendLine(
+				$"Chunks loaded: {world.DebugLoadedChunkCount}  Active targets: {world.DebugActiveRenderChunkCount}  Queue: {world.DebugQueuedChunkBuildCount}");
+			int src = world.DebugStreamingRadiusChunk;
+			b.AppendLine($"Stream radius chunk: {(src == int.MinValue ? "n/a" : src.ToString())}");
+			b.AppendLine($"Initial load busy: {world.IsInitialChunkLoadInProgress}");
+		}
+
+		if (player != null)
+		{
+			b.AppendLine("--- Player ---");
+			player.AppendTechnicalDebugHud(b, world);
+		}
+
+		if (!string.IsNullOrWhiteSpace(SaveGameManager.CurrentSaveName))
+		{
+			b.AppendLine("--- Save ---");
+			b.AppendLine($"Name: {SaveGameManager.CurrentSaveName}");
+			b.AppendLine($"Slot: {SaveGameManager.CurrentSlotId ?? "<none>"}");
+		}
+
+		technicalDebugHudLabel.Text = b.ToString();
 	}
 
 	private void TogglePauseMenu()
