@@ -447,7 +447,8 @@ public partial class GameRoot : Node3D
 			$"FPS (~20 fr avg): {(technicalDebugFpsSmoothed > 0.5f ? technicalDebugFpsSmoothed : 1f / Mathf.Max(delta, 1e-4f)):F1}  Frame ms: {delta * 1000f:F2}");
 		b.AppendLine($"Process frame: {Engine.GetProcessFrames()}");
 		Viewport vp = GetViewport();
-		b.AppendLine($"MSAA 3D: {vp.Msaa3D}  SSAA: {vp.ScreenSpaceAA}  TAA: {vp.UseTaa}");
+		b.AppendLine(
+			$"MSAA 3D: {vp.Msaa3D}  SSAA: {vp.ScreenSpaceAA}  TAA: {vp.UseTaa}  Occlusion: {vp.UseOcclusionCulling}");
 		Vector2I win = DisplayServer.WindowGetSize();
 		b.AppendLine($"Window: {win.X}×{win.Y}  Paused: {GetTree().Paused}  Loading: {loadingScreenVisible}");
 

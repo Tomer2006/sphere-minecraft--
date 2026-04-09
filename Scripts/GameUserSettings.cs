@@ -117,6 +117,7 @@ public static class GameUserSettings
 		};
 
 		window.UseTaa = GraphicsUseTaa;
+		window.UseOcclusionCulling = true;
 	}
 
 	public static BaseMaterial3D.TextureFilterEnum GetPlanetBlockTextureFilter() =>

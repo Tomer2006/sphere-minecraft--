@@ -42,12 +42,11 @@ public partial class PlanetVoxelWorld
 		Vector2[] Uvs,
 		Color[] Colors,
 		int[] Indices,
-		Vector3[] CollisionFaces,
 		RaycastTriangleInfo[] RaycastTriangles)
 	{
 		public static ChunkBuildResult Empty(ChunkKey key, int revision)
 		{
-			return new ChunkBuildResult(key, revision, [], [], [], [], [], [], []);
+			return new ChunkBuildResult(key, revision, [], [], [], [], [], []);
 		}
 	}
 

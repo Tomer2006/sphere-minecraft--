@@ -289,11 +289,19 @@ public partial class PlanetVoxelWorld
 		mesh.SurfaceSetMaterial(0, planetMaterial);
 		chunk.MeshInstance.Mesh = mesh;
 
-		if (TryBuildConcaveCollisionShape(
-			    result.CollisionFaces,
-			    result.RaycastTriangles,
-			    out ConcavePolygonShape3D? concaveShape,
-			    out RaycastTriangleInfo[] filteredRaycast))
+		Vector3[] collisionPacked = PackCollisionTriangleVerticesFromIndexedMesh(result.Vertices, result.Indices);
+		int triCountFromIndices = result.Indices.Length / 3;
+		if (result.RaycastTriangles.Length != triCountFromIndices)
+		{
+			RuntimeLog.Warning(RuntimeLogChannel.Chunk,
+				$"Chunk {FormatChunkKey(result.Key)}: raycast tri count {result.RaycastTriangles.Length} != mesh tri count {triCountFromIndices}; collision disabled for this chunk.");
+			chunk.CollisionShape.Shape = null;
+		}
+		else if (TryBuildConcaveCollisionShape(
+			         collisionPacked,
+			         result.RaycastTriangles,
+			         out ConcavePolygonShape3D? concaveShape,
+			         out RaycastTriangleInfo[] filteredRaycast))
 		{
 			chunk.RaycastTriangles.AddRange(filteredRaycast);
 			chunk.CollisionShape.Shape = concaveShape;
@@ -301,10 +309,10 @@ public partial class PlanetVoxelWorld
 		else
 		{
 			chunk.CollisionShape.Shape = null;
-			if (result.CollisionFaces.Length > 0)
+			if (collisionPacked.Length > 0)
 			{
 				RuntimeLog.Warning(RuntimeLogChannel.Chunk,
-					$"Chunk {FormatChunkKey(result.Key)}: collision skipped (degenerate / invalid tris). CollisionVertsIn={result.CollisionFaces.Length}, RaycastIn={result.RaycastTriangles.Length}");
+					$"Chunk {FormatChunkKey(result.Key)}: collision skipped (degenerate / invalid tris). CollisionVertsIn={collisionPacked.Length}, RaycastIn={result.RaycastTriangles.Length}");
 			}
 		}
 
@@ -313,6 +321,32 @@ public partial class PlanetVoxelWorld
 
 		RuntimeLog.Info(RuntimeLogChannel.Chunk,
 			$"Applied chunk build {FormatChunkKey(result.Key)}. Revision={result.Revision}, Vertices={result.Vertices.Length}, Indices={result.Indices.Length}, CollisionTris={chunk.RaycastTriangles.Count}, CollisionEnabled={chunk.CollisionShape.Shape != null}");
+	}
+
+	/// <summary>
+	/// Expand indexed render mesh triangles into a flat vertex triple list for <see cref="ConcavePolygonShape3D"/>.
+	/// Built on the main thread so worker threads skip maintaining a duplicate collision buffer.
+	/// </summary>
+	private static Vector3[] PackCollisionTriangleVerticesFromIndexedMesh(Vector3[] vertices, int[] indices)
+	{
+		if (indices.Length < 3 || indices.Length % 3 != 0)
+		{
+			return [];
+		}
+
+		Vector3[] packed = new Vector3[indices.Length];
+		for (int i = 0; i < indices.Length; i++)
+		{
+			int vi = indices[i];
+			if ((uint)vi >= (uint)vertices.Length)
+			{
+				return [];
+			}
+
+			packed[i] = vertices[vi];
+		}
+
+		return packed;
 	}
 
 	/// <summary>
