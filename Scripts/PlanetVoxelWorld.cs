@@ -47,16 +47,21 @@ public partial class PlanetVoxelWorld : Node3D
 
 	[ExportGroup("Chunk Streaming")]
 	[Export(PropertyHint.Range, "8,64,1")] public int ChunkSizeInCells { get; set; } = 24;
+	/// <summary>
+	/// Surface (face U/V) streaming: BFS steps across adjacent chunk footprints on the cube, including
+	/// face edges. Paired with <see cref="ActiveRenderRadiusChunkLoadRadius"/> to define the active
+	/// <see cref="ChunkKey"/> set.
+	/// </summary>
 	[Export(PropertyHint.Range, "1,32,1")]
 	public int ActiveRenderChunkLoadRadius { get; set; } = 5;
 
 	/// <summary>
-	/// Inner streaming ring (smaller than <see cref="ActiveRenderChunkLoadRadius"/>). Chunks whose column
-	/// falls in the outer ring but outside this core are kept loaded until the column leaves the outer ring,
-	/// reducing edge flicker when the player moves slightly on chunk boundaries.
+	/// Radial streaming: chunk layers above and below the player's radius chunk (along
+	/// <see cref="PlanetCellId.Radius"/>), combined with the surface radius to form cubic chunks only.
 	/// </summary>
-	[Export(PropertyHint.Range, "1,32,1")]
-	public int ActiveRenderChunkUnloadRadius { get; set; } = 4;
+	[Export(PropertyHint.Range, "1,64,1")]
+	public int ActiveRenderRadiusChunkLoadRadius { get; set; } = 4;
+
 	[Export(PropertyHint.Range, "2,64,1")] public int SurfaceShellDepthInBlocks { get; set; } = 12;
 	[Export(PropertyHint.Range, "1,12,1")] public int ExtraOutwardBlocks { get; set; } = 2;
 	[ExportGroup("Rendering")]

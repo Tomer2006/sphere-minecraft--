@@ -58,34 +58,6 @@ public partial class MainMenu : Control
 		};
 		AddChild(background);
 
-		ColorRect glow = new()
-		{
-			Color = new Color(0.30f, 0.55f, 0.32f, 0.16f),
-			AnchorLeft = 0.5f,
-			AnchorTop = 0.5f,
-			AnchorRight = 0.5f,
-			AnchorBottom = 0.5f,
-			OffsetLeft = -420f,
-			OffsetTop = -280f,
-			OffsetRight = 420f,
-			OffsetBottom = 280f
-		};
-		AddChild(glow);
-
-		ColorRect accent = new()
-		{
-			Color = new Color(0.76f, 0.90f, 0.58f, 0.05f),
-			AnchorLeft = 0.5f,
-			AnchorTop = 0.5f,
-			AnchorRight = 0.5f,
-			AnchorBottom = 0.5f,
-			OffsetLeft = -250f,
-			OffsetTop = -210f,
-			OffsetRight = 250f,
-			OffsetBottom = 210f
-		};
-		AddChild(accent);
-
 		PanelContainer panel = new()
 		{
 			AnchorLeft = 0.5f,
@@ -99,7 +71,7 @@ public partial class MainMenu : Control
 		};
 		panel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
 			new Color(0.08f, 0.10f, 0.14f, 0.96f),
-			new Color(0.43f, 0.58f, 0.35f, 0.35f),
+			new Color(0.34f, 0.44f, 0.52f, 0.38f),
 			24,
 			1));
 		AddChild(panel);
@@ -616,10 +588,10 @@ public partial class MainMenu : Control
 			rowPanel.SizeFlagsHorizontal = SizeFlags.ExpandFill;
 			rowPanel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
 				isLatest
-					? new Color(0.13f, 0.18f, 0.14f, 0.96f)
+					? new Color(0.12f, 0.16f, 0.21f, 0.96f)
 					: new Color(0.12f, 0.14f, 0.18f, 0.92f),
 				isLatest
-					? new Color(0.58f, 0.78f, 0.46f, 0.42f)
+					? new Color(0.42f, 0.56f, 0.68f, 0.45f)
 					: new Color(0.30f, 0.38f, 0.46f, 0.25f),
 				16,
 				1));
@@ -660,12 +632,12 @@ public partial class MainMenu : Control
 					CustomMinimumSize = new Vector2(72f, 28f)
 				};
 				latestLabel.AddThemeFontSizeOverride("font_size", 12);
-				latestLabel.AddThemeColorOverride("font_color", new Color(0.17f, 0.24f, 0.12f, 1f));
+				latestLabel.AddThemeColorOverride("font_color", new Color(0.88f, 0.93f, 0.98f, 1f));
 
 				PanelContainer badge = new();
 				badge.AddThemeStyleboxOverride("panel", CreatePanelStyle(
-					new Color(0.72f, 0.89f, 0.56f, 0.95f),
-					new Color(0.90f, 0.98f, 0.82f, 0.0f),
+					new Color(0.28f, 0.40f, 0.54f, 0.95f),
+					new Color(0.50f, 0.65f, 0.82f, 0.35f),
 					12,
 					0));
 				badge.AddChild(latestLabel);
@@ -1055,21 +1027,21 @@ public partial class MainMenu : Control
 	private static void StylePrimaryButton(Button button)
 	{
 		button.AddThemeStyleboxOverride("normal", CreatePanelStyle(
-			new Color(0.44f, 0.64f, 0.38f, 0.95f),
-			new Color(0.62f, 0.82f, 0.53f, 0.55f),
+			new Color(0.30f, 0.46f, 0.62f, 0.96f),
+			new Color(0.48f, 0.62f, 0.78f, 0.55f),
 			14,
 			1));
 		button.AddThemeStyleboxOverride("hover", CreatePanelStyle(
-			new Color(0.49f, 0.70f, 0.42f, 0.98f),
-			new Color(0.70f, 0.88f, 0.60f, 0.65f),
+			new Color(0.36f, 0.52f, 0.70f, 0.98f),
+			new Color(0.56f, 0.70f, 0.86f, 0.62f),
 			14,
 			1));
 		button.AddThemeStyleboxOverride("pressed", CreatePanelStyle(
-			new Color(0.36f, 0.54f, 0.31f, 1f),
-			new Color(0.70f, 0.88f, 0.60f, 0.45f),
+			new Color(0.22f, 0.36f, 0.50f, 1f),
+			new Color(0.44f, 0.58f, 0.74f, 0.45f),
 			14,
 			1));
-		button.AddThemeColorOverride("font_color", new Color(0.05f, 0.09f, 0.04f, 1f));
+		button.AddThemeColorOverride("font_color", new Color(0.96f, 0.97f, 0.99f, 1f));
 	}
 
 	private static void StyleSecondaryButton(Button button)
