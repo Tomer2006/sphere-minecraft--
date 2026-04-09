@@ -29,6 +29,10 @@ public partial class MainMenu : Control
 	private HSlider? masterVolumeSlider;
 	private Label? masterVolumeValueLabel;
 	private CheckButton? fullscreenCheck;
+	private OptionButton? msaaOption;
+	private OptionButton? screenSpaceAaOption;
+	private CheckButton? taaCheck;
+	private CheckButton? voxelLinearTexturesCheck;
 	private bool syncingSettingsUi;
 
 	public override void _Ready()
@@ -39,6 +43,7 @@ public partial class MainMenu : Control
 		RefreshSettingsUiFromStore();
 		GameUserSettings.ApplyAudio();
 		GameUserSettings.ApplyWindowMode();
+		GameUserSettings.ApplyGraphics();
 		ResetNewWorldForm();
 		ShowIntroScreen();
 		RefreshState();
@@ -307,7 +312,7 @@ public partial class MainMenu : Control
 
 		Label settingsHint = new()
 		{
-			Text = "Changes save automatically and apply when you start or resume a world.",
+			Text = "Changes save automatically. Mouse, volume, display, and 3D AA apply immediately. Block texture filtering applies when you load a world.",
 			HorizontalAlignment = HorizontalAlignment.Center,
 			AutowrapMode = TextServer.AutowrapMode.WordSmart
 		};
@@ -381,6 +386,35 @@ public partial class MainMenu : Control
 		};
 		fullscreenCheck.Toggled += OnFullscreenToggled;
 		formLayout.AddChild(CreateFieldBlock("Display", fullscreenCheck));
+
+		msaaOption = CreateGraphicsOptionButton();
+		msaaOption.AddItem("Disabled", 0);
+		msaaOption.AddItem("2× MSAA", 1);
+		msaaOption.AddItem("4× MSAA", 2);
+		msaaOption.AddItem("8× MSAA", 3);
+		msaaOption.ItemSelected += OnMsaaItemSelected;
+		formLayout.AddChild(CreateFieldBlock("3D MSAA (geometry edges)", msaaOption));
+
+		screenSpaceAaOption = CreateGraphicsOptionButton();
+		screenSpaceAaOption.AddItem("None", 0);
+		screenSpaceAaOption.AddItem("FXAA", 1);
+		screenSpaceAaOption.AddItem("SMAA 1×", 2);
+		screenSpaceAaOption.ItemSelected += OnScreenSpaceAaItemSelected;
+		formLayout.AddChild(CreateFieldBlock("Screen-space antialiasing", screenSpaceAaOption));
+
+		taaCheck = new CheckButton
+		{
+			Text = "Temporal AA (TAA) — Forward+; can blur or ghost slightly"
+		};
+		taaCheck.Toggled += OnTaaToggled;
+		formLayout.AddChild(CreateFieldBlock("Temporal AA", taaCheck));
+
+		voxelLinearTexturesCheck = new CheckButton
+		{
+			Text = "Smooth block textures (linear + anisotropic filtering)"
+		};
+		voxelLinearTexturesCheck.Toggled += OnVoxelLinearTexturesToggled;
+		formLayout.AddChild(CreateFieldBlock("Block textures", voxelLinearTexturesCheck));
 
 		HBoxContainer actions = new();
 		actions.AddThemeConstantOverride("separation", 12);
@@ -768,6 +802,26 @@ public partial class MainMenu : Control
 			{
 				fullscreenCheck.ButtonPressed = GameUserSettings.Fullscreen;
 			}
+
+			if (msaaOption != null)
+			{
+				msaaOption.Selected = GameUserSettings.GraphicsMsaa3D;
+			}
+
+			if (screenSpaceAaOption != null)
+			{
+				screenSpaceAaOption.Selected = GameUserSettings.GraphicsScreenSpaceAa;
+			}
+
+			if (taaCheck != null)
+			{
+				taaCheck.ButtonPressed = GameUserSettings.GraphicsUseTaa;
+			}
+
+			if (voxelLinearTexturesCheck != null)
+			{
+				voxelLinearTexturesCheck.ButtonPressed = GameUserSettings.GraphicsVoxelLinearTextures;
+			}
 		}
 		finally
 		{
@@ -824,6 +878,53 @@ public partial class MainMenu : Control
 
 		GameUserSettings.Fullscreen = pressed;
 		GameUserSettings.ApplyWindowMode();
+		GameUserSettings.Save();
+	}
+
+	private void OnMsaaItemSelected(long index)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.GraphicsMsaa3D = (int)index;
+		GameUserSettings.ApplyGraphics();
+		GameUserSettings.Save();
+	}
+
+	private void OnScreenSpaceAaItemSelected(long index)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.GraphicsScreenSpaceAa = (int)index;
+		GameUserSettings.ApplyGraphics();
+		GameUserSettings.Save();
+	}
+
+	private void OnTaaToggled(bool pressed)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.GraphicsUseTaa = pressed;
+		GameUserSettings.ApplyGraphics();
+		GameUserSettings.Save();
+	}
+
+	private void OnVoxelLinearTexturesToggled(bool pressed)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.GraphicsVoxelLinearTextures = pressed;
 		GameUserSettings.Save();
 	}
 
@@ -991,6 +1092,13 @@ public partial class MainMenu : Control
 			SizeFlagsHorizontal = SizeFlags.ExpandFill
 		};
 	}
+
+	private static OptionButton CreateGraphicsOptionButton() =>
+		new()
+		{
+			SizeFlagsHorizontal = SizeFlags.ExpandFill,
+			CustomMinimumSize = new Vector2(160f, 0f)
+		};
 
 	private static VBoxContainer CreateFieldBlock(string labelText, Control control)
 	{

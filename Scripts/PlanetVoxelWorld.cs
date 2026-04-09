@@ -394,7 +394,7 @@ public partial class PlanetVoxelWorld : Node3D
 			CullMode = BaseMaterial3D.CullModeEnum.Disabled,
 			Roughness = 1f,
 			Metallic = 0f,
-			TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic
+			TextureFilter = GameUserSettings.GetPlanetBlockTextureFilter()
 		};
 	}
 }

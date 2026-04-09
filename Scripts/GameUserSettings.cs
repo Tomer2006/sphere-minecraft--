@@ -14,9 +14,28 @@ public static class GameUserSettings
 	private const float MinMouseSensitivity = 0.02f;
 	private const float MaxMouseSensitivity = 0.45f;
 
+	/// <summary>0 = off, 1 = 2×, 2 = 4×, 3 = 8×.</summary>
+	public const int MinMsaa3D = 0;
+	public const int MaxMsaa3D = 3;
+
+	/// <summary>0 = none, 1 = FXAA, 2 = SMAA 1x.</summary>
+	public const int MinScreenSpaceAa = 0;
+	public const int MaxScreenSpaceAa = 2;
+
 	public static float MouseSensitivity { get; set; } = DefaultMouseSensitivity;
 	public static float MasterVolumeLinear { get; set; } = 1f;
 	public static bool Fullscreen { get; set; }
+
+	/// <summary>MSAA level index; see <see cref="MinMsaa3D"/> / <see cref="MaxMsaa3D"/>.</summary>
+	public static int GraphicsMsaa3D { get; set; } = 2;
+
+	/// <summary>Screen-space AA mode index; see <see cref="MinScreenSpaceAa"/> / <see cref="MaxScreenSpaceAa"/>.</summary>
+	public static int GraphicsScreenSpaceAa { get; set; } = 1;
+
+	public static bool GraphicsUseTaa { get; set; }
+
+	/// <summary>When true, voxel atlas uses linear + anisotropic filtering; when false, nearest (pixel-crisp).</summary>
+	public static bool GraphicsVoxelLinearTextures { get; set; } = true;
 
 	public static void Load()
 	{
@@ -29,9 +48,15 @@ public static class GameUserSettings
 		MouseSensitivity = ReadFloat(cfg, "mouse_sensitivity", MouseSensitivity);
 		MasterVolumeLinear = ReadFloat(cfg, "master_volume_linear", MasterVolumeLinear);
 		Fullscreen = (bool)cfg.GetValue(Section, "fullscreen", Fullscreen).AsBool();
+		GraphicsMsaa3D = ReadInt(cfg, "graphics_msaa_3d", GraphicsMsaa3D);
+		GraphicsScreenSpaceAa = ReadInt(cfg, "graphics_screen_space_aa", GraphicsScreenSpaceAa);
+		GraphicsUseTaa = (bool)cfg.GetValue(Section, "graphics_use_taa", GraphicsUseTaa).AsBool();
+		GraphicsVoxelLinearTextures = (bool)cfg.GetValue(Section, "graphics_voxel_linear_textures", GraphicsVoxelLinearTextures).AsBool();
 
 		MouseSensitivity = Mathf.Clamp(MouseSensitivity, MinMouseSensitivity, MaxMouseSensitivity);
 		MasterVolumeLinear = Mathf.Clamp(MasterVolumeLinear, 0f, 1f);
+		GraphicsMsaa3D = Mathf.Clamp(GraphicsMsaa3D, MinMsaa3D, MaxMsaa3D);
+		GraphicsScreenSpaceAa = Mathf.Clamp(GraphicsScreenSpaceAa, MinScreenSpaceAa, MaxScreenSpaceAa);
 	}
 
 	public static void Save()
@@ -40,6 +65,10 @@ public static class GameUserSettings
 		cfg.SetValue(Section, "mouse_sensitivity", MouseSensitivity);
 		cfg.SetValue(Section, "master_volume_linear", MasterVolumeLinear);
 		cfg.SetValue(Section, "fullscreen", Fullscreen);
+		cfg.SetValue(Section, "graphics_msaa_3d", GraphicsMsaa3D);
+		cfg.SetValue(Section, "graphics_screen_space_aa", GraphicsScreenSpaceAa);
+		cfg.SetValue(Section, "graphics_use_taa", GraphicsUseTaa);
+		cfg.SetValue(Section, "graphics_voxel_linear_textures", GraphicsVoxelLinearTextures);
 		cfg.Save(FilePath);
 	}
 
@@ -61,6 +90,40 @@ public static class GameUserSettings
 			Fullscreen ? DisplayServer.WindowMode.ExclusiveFullscreen : DisplayServer.WindowMode.Windowed);
 	}
 
+	/// <summary>
+	/// Applies MSAA, screen-space AA, and TAA on the root window viewport (Forward+).
+	/// </summary>
+	public static void ApplyGraphics()
+	{
+		if (Engine.GetMainLoop() is not SceneTree tree)
+		{
+			return;
+		}
+
+		Window window = tree.Root;
+		window.Msaa3D = GraphicsMsaa3D switch
+		{
+			1 => Viewport.Msaa.Msaa2X,
+			2 => Viewport.Msaa.Msaa4X,
+			3 => Viewport.Msaa.Msaa8X,
+			_ => Viewport.Msaa.Disabled
+		};
+
+		window.ScreenSpaceAA = GraphicsScreenSpaceAa switch
+		{
+			1 => Viewport.ScreenSpaceAAEnum.Fxaa,
+			2 => Viewport.ScreenSpaceAAEnum.Smaa,
+			_ => Viewport.ScreenSpaceAAEnum.Disabled
+		};
+
+		window.UseTaa = GraphicsUseTaa;
+	}
+
+	public static BaseMaterial3D.TextureFilterEnum GetPlanetBlockTextureFilter() =>
+		GraphicsVoxelLinearTextures
+			? BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic
+			: BaseMaterial3D.TextureFilterEnum.NearestWithMipmaps;
+
 	public static void ApplyToPlayer(PlanetPlayer player)
 	{
 		player.MouseSensitivity = Mathf.Clamp(MouseSensitivity, MinMouseSensitivity, MaxMouseSensitivity);
@@ -73,6 +136,17 @@ public static class GameUserSettings
 		{
 			Variant.Type.Float => (float)v.AsDouble(),
 			Variant.Type.Int => (float)v.AsInt32(),
+			_ => fallback
+		};
+	}
+
+	private static int ReadInt(ConfigFile cfg, string key, int fallback)
+	{
+		Variant v = cfg.GetValue(Section, key, fallback);
+		return v.VariantType switch
+		{
+			Variant.Type.Int => v.AsInt32(),
+			Variant.Type.Float => Mathf.RoundToInt((float)v.AsDouble()),
 			_ => fallback
 		};
 	}

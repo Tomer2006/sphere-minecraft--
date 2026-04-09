@@ -39,6 +39,7 @@ public partial class GameRoot : Node3D
 		RuntimeLog.Info(RuntimeLogChannel.Session, $"GameRoot ready. WorldPath={WorldPath}, PlayerPath={PlayerPath}");
 		GameUserSettings.Load();
 		GameUserSettings.ApplyAudio();
+		GameUserSettings.ApplyGraphics();
 		BuildLoadingScreen();
 		BuildPauseMenu();
 		CallDeferred(nameof(InitializeSession));
