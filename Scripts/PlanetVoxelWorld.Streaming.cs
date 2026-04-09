@@ -44,7 +44,7 @@ public partial class PlanetVoxelWorld
 		int chunkSize = Mathf.Max(8, ChunkSizeInCells);
 		int uvBfsRadius = Mathf.Clamp(ActiveRenderChunkLoadRadius, 1, 32);
 		int radialExtentChunks = Mathf.Clamp(ActiveRenderRadiusChunkLoadRadius, 1, 64);
-		int maxRadiusChunk = GetMaxPlanetRadiusChunk(chunkSize);
+		int maxRadiusChunk = GetMaxStreamingRadiusChunk();
 		HashSet<ChunkKey> nextRenderChunks = CollectActiveCubicChunks(
 			anchor,
 			chunkSize,
@@ -471,9 +471,10 @@ public partial class PlanetVoxelWorld
 		#endregion
 	}
 
-	private int GetMaxPlanetRadiusChunk(int chunkSize)
-	{
-		int maxRadiusExclusive = Mathf.CeilToInt(BaseRadiusInBlocks + HeightVariationInBlocks) + ExtraOutwardBlocks;
-		return Mathf.Max(0, Mathf.Max(0, maxRadiusExclusive - 1) / chunkSize);
-	}
+	/// <summary>
+	/// Upper bound for radial chunk indices when collecting active chunks. Uses <see cref="int.MaxValue"/> so
+	/// outward building is not limited to the procedural terrain shell; streaming depth is still bounded by
+	/// the player's radius chunk plus <see cref="ActiveRenderRadiusChunkLoadRadius"/>.
+	/// </summary>
+	private static int GetMaxStreamingRadiusChunk() => int.MaxValue;
 }
