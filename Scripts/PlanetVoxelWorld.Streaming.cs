@@ -395,7 +395,8 @@ public partial class PlanetVoxelWorld
 	private float GetChunkPriorityDistanceSquared(ChunkKey key)
 	{
 		// ApplyCompletedBuilds runs before UpdateStreaming each frame, so trackedPlayer is often still
-		// null unless we resolve here. Without a real distance every chunk ties at 0 and order is random.
+		// null unless we resolve here. Without a player, distance ties at 0 and CompareChunkBuildPriority
+		// tie-breakers (radius, face, u, v) order work deterministically.
 		trackedPlayer ??= ResolvePlayer();
 		if (trackedPlayer != null)
 		{
@@ -415,28 +416,7 @@ public partial class PlanetVoxelWorld
 			return playerLocal.DistanceSquaredTo(chunkCenter);
 		}
 
-		if (currentAnchor.HasValue)
-		{
-			int uvSteps = GetApproximateUvChunkStepsFromAnchor(key);
-			return (float)(uvSteps * uvSteps);
-		}
-
 		return 0f;
-	}
-
-	private int GetApproximateUvChunkStepsFromAnchor(ChunkKey key)
-	{
-		if (!currentAnchor.HasValue)
-		{
-			return 0;
-		}
-
-		int chunkSize = Mathf.Max(8, ChunkSizeInCells);
-		ChunkAnchor anchor = currentAnchor.Value;
-		int anchorUChunk = anchor.U / chunkSize;
-		int anchorVChunk = anchor.V / chunkSize;
-		int facePenalty = key.Face == anchor.Face ? 0 : ActiveRenderChunkLoadRadius + 1;
-		return facePenalty + Mathf.Abs(key.UChunk - anchorUChunk) + Mathf.Abs(key.VChunk - anchorVChunk);
 	}
 
 	private int GetApproximateChunkRadiusDistance(ChunkKey key)

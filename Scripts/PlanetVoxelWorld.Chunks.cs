@@ -289,17 +289,91 @@ public partial class PlanetVoxelWorld
 		mesh.SurfaceSetMaterial(0, planetMaterial);
 		chunk.MeshInstance.Mesh = mesh;
 
-		chunk.RaycastTriangles.AddRange(result.RaycastTriangles);
-		chunk.CollisionShape.Shape = new ConcavePolygonShape3D
+		if (TryBuildConcaveCollisionShape(
+			    result.CollisionFaces,
+			    result.RaycastTriangles,
+			    out ConcavePolygonShape3D? concaveShape,
+			    out RaycastTriangleInfo[] filteredRaycast))
 		{
-			BackfaceCollision = true,
-			Data = result.CollisionFaces
-		};
+			chunk.RaycastTriangles.AddRange(filteredRaycast);
+			chunk.CollisionShape.Shape = concaveShape;
+		}
+		else
+		{
+			chunk.CollisionShape.Shape = null;
+			if (result.CollisionFaces.Length > 0)
+			{
+				RuntimeLog.Warning(RuntimeLogChannel.Chunk,
+					$"Chunk {FormatChunkKey(result.Key)}: collision skipped (degenerate / invalid tris). CollisionVertsIn={result.CollisionFaces.Length}, RaycastIn={result.RaycastTriangles.Length}");
+			}
+		}
+
 		chunkBodiesById[chunk.CollisionBody.GetInstanceId()] = chunk;
 		MarkInitialChunkLoadComplete(result.Key);
 
 		RuntimeLog.Info(RuntimeLogChannel.Chunk,
-			$"Applied chunk build {FormatChunkKey(result.Key)}. Revision={result.Revision}, Vertices={result.Vertices.Length}, Indices={result.Indices.Length}, CollisionFaces={result.CollisionFaces.Length}, RaycastTriangles={result.RaycastTriangles.Length}, CollisionEnabled=true");
+			$"Applied chunk build {FormatChunkKey(result.Key)}. Revision={result.Revision}, Vertices={result.Vertices.Length}, Indices={result.Indices.Length}, CollisionTris={chunk.RaycastTriangles.Count}, CollisionEnabled={chunk.CollisionShape.Shape != null}");
+	}
+
+	/// <summary>
+	/// Jolt removes degenerate triangles when building mesh shapes; if none remain, shape creation fails.
+	/// Drop zero-area collision triangles (e.g. inward faces at radius 0) and keep raycast data aligned.
+	/// </summary>
+	private const float MinCollisionTriangleCrossLengthSq = 1e-14f;
+
+	private static bool IsFiniteCollisionVector(Vector3 v) =>
+		float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
+
+	private static bool TryBuildConcaveCollisionShape(
+		Vector3[] collisionFaces,
+		RaycastTriangleInfo[] raycastInfos,
+		out ConcavePolygonShape3D? shape,
+		out RaycastTriangleInfo[] filteredRaycast)
+	{
+		shape = null;
+		filteredRaycast = [];
+		int triCount = collisionFaces.Length / 3;
+		if (collisionFaces.Length == 0 || triCount * 3 != collisionFaces.Length || raycastInfos.Length != triCount)
+		{
+			return false;
+		}
+
+		List<Vector3> packed = new(triCount * 3);
+		List<RaycastTriangleInfo> rays = new(triCount);
+		for (int t = 0; t < triCount; t++)
+		{
+			Vector3 v0 = collisionFaces[t * 3];
+			Vector3 v1 = collisionFaces[t * 3 + 1];
+			Vector3 v2 = collisionFaces[t * 3 + 2];
+			if (!IsFiniteCollisionVector(v0) || !IsFiniteCollisionVector(v1) || !IsFiniteCollisionVector(v2))
+			{
+				continue;
+			}
+
+			float crossSq = (v1 - v0).Cross(v2 - v0).LengthSquared();
+			if (crossSq < MinCollisionTriangleCrossLengthSq)
+			{
+				continue;
+			}
+
+			packed.Add(v0);
+			packed.Add(v1);
+			packed.Add(v2);
+			rays.Add(raycastInfos[t]);
+		}
+
+		if (packed.Count < 3)
+		{
+			return false;
+		}
+
+		filteredRaycast = rays.ToArray();
+		shape = new ConcavePolygonShape3D
+		{
+			BackfaceCollision = true,
+			Data = packed.ToArray()
+		};
+		return true;
 	}
 
 	private void MarkInitialChunkLoadComplete(ChunkKey key)
