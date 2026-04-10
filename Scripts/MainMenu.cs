@@ -24,10 +24,26 @@ public partial class MainMenu : Control
 	private SpinBox? worldSeedInput;
 	private Label? createWorldStatusLabel;
 
+	private HSlider? mouseSensitivitySlider;
+	private Label? mouseSensitivityValueLabel;
+	private HSlider? masterVolumeSlider;
+	private Label? masterVolumeValueLabel;
+	private CheckButton? fullscreenCheck;
+	private OptionButton? msaaOption;
+	private OptionButton? screenSpaceAaOption;
+	private CheckButton? taaCheck;
+	private CheckButton? voxelLinearTexturesCheck;
+	private bool syncingSettingsUi;
+
 	public override void _Ready()
 	{
 		random.Randomize();
 		BuildMenu();
+		GameUserSettings.Load();
+		RefreshSettingsUiFromStore();
+		GameUserSettings.ApplyAudio();
+		GameUserSettings.ApplyWindowMode();
+		GameUserSettings.ApplyGraphics();
 		ResetNewWorldForm();
 		ShowIntroScreen();
 		RefreshState();
@@ -47,34 +63,6 @@ public partial class MainMenu : Control
 		};
 		AddChild(background);
 
-		ColorRect glow = new()
-		{
-			Color = new Color(0.30f, 0.55f, 0.32f, 0.16f),
-			AnchorLeft = 0.5f,
-			AnchorTop = 0.5f,
-			AnchorRight = 0.5f,
-			AnchorBottom = 0.5f,
-			OffsetLeft = -420f,
-			OffsetTop = -280f,
-			OffsetRight = 420f,
-			OffsetBottom = 280f
-		};
-		AddChild(glow);
-
-		ColorRect accent = new()
-		{
-			Color = new Color(0.76f, 0.90f, 0.58f, 0.05f),
-			AnchorLeft = 0.5f,
-			AnchorTop = 0.5f,
-			AnchorRight = 0.5f,
-			AnchorBottom = 0.5f,
-			OffsetLeft = -250f,
-			OffsetTop = -210f,
-			OffsetRight = 250f,
-			OffsetBottom = 210f
-		};
-		AddChild(accent);
-
 		PanelContainer panel = new()
 		{
 			AnchorLeft = 0.5f,
@@ -88,7 +76,7 @@ public partial class MainMenu : Control
 		};
 		panel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
 			new Color(0.08f, 0.10f, 0.14f, 0.96f),
-			new Color(0.43f, 0.58f, 0.35f, 0.35f),
+			new Color(0.34f, 0.44f, 0.52f, 0.38f),
 			24,
 			1));
 		AddChild(panel);
@@ -322,6 +310,15 @@ public partial class MainMenu : Control
 		sectionTitle.AddThemeFontSizeOverride("font_size", 24);
 		parent.AddChild(sectionTitle);
 
+		Label settingsHint = new()
+		{
+			Text = "Changes save automatically. Mouse, volume, display, and 3D AA apply immediately. Block texture filtering applies when you load a world.",
+			HorizontalAlignment = HorizontalAlignment.Center,
+			AutowrapMode = TextServer.AutowrapMode.WordSmart
+		};
+		settingsHint.AddThemeColorOverride("font_color", new Color(0.78f, 0.84f, 0.88f, 0.82f));
+		parent.AddChild(settingsHint);
+
 		PanelContainer panel = new();
 		panel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
 			new Color(0.10f, 0.13f, 0.18f, 0.90f),
@@ -337,14 +334,87 @@ public partial class MainMenu : Control
 		margin.AddThemeConstantOverride("margin_bottom", 18);
 		panel.AddChild(margin);
 
-		Label settingsHint = new()
+		VBoxContainer formLayout = new();
+		formLayout.AddThemeConstantOverride("separation", 14);
+		margin.AddChild(formLayout);
+
+		mouseSensitivityValueLabel = new Label
 		{
-			Text = "Settings screen placeholder. Add actual settings here next.",
-			HorizontalAlignment = HorizontalAlignment.Center,
-			AutowrapMode = TextServer.AutowrapMode.WordSmart
+			CustomMinimumSize = new Vector2(48f, 0f),
+			HorizontalAlignment = HorizontalAlignment.Right,
+			VerticalAlignment = VerticalAlignment.Center
 		};
-		settingsHint.AddThemeColorOverride("font_color", new Color(0.78f, 0.84f, 0.88f, 0.82f));
-		margin.AddChild(settingsHint);
+		mouseSensitivityValueLabel.AddThemeColorOverride("font_color", new Color(0.84f, 0.91f, 0.94f, 0.92f));
+		mouseSensitivitySlider = new HSlider
+		{
+			MinValue = 0.02,
+			MaxValue = 0.45,
+			Step = 0.01,
+			SizeFlagsHorizontal = SizeFlags.ExpandFill
+		};
+		mouseSensitivitySlider.ValueChanged += OnMouseSensitivitySliderChanged;
+		HBoxContainer mouseRow = new();
+		mouseRow.AddThemeConstantOverride("separation", 10);
+		mouseRow.AddChild(mouseSensitivitySlider);
+		mouseRow.AddChild(mouseSensitivityValueLabel);
+		formLayout.AddChild(CreateFieldBlock("Mouse sensitivity", mouseRow));
+
+		masterVolumeValueLabel = new Label
+		{
+			CustomMinimumSize = new Vector2(44f, 0f),
+			HorizontalAlignment = HorizontalAlignment.Right,
+			VerticalAlignment = VerticalAlignment.Center
+		};
+		masterVolumeValueLabel.AddThemeColorOverride("font_color", new Color(0.84f, 0.91f, 0.94f, 0.92f));
+		masterVolumeSlider = new HSlider
+		{
+			MinValue = 0.0,
+			MaxValue = 1.0,
+			Step = 0.01,
+			SizeFlagsHorizontal = SizeFlags.ExpandFill
+		};
+		masterVolumeSlider.ValueChanged += OnMasterVolumeSliderChanged;
+		HBoxContainer volumeRow = new();
+		volumeRow.AddThemeConstantOverride("separation", 10);
+		volumeRow.AddChild(masterVolumeSlider);
+		volumeRow.AddChild(masterVolumeValueLabel);
+		formLayout.AddChild(CreateFieldBlock("Master volume", volumeRow));
+
+		fullscreenCheck = new CheckButton
+		{
+			Text = "Exclusive fullscreen"
+		};
+		fullscreenCheck.Toggled += OnFullscreenToggled;
+		formLayout.AddChild(CreateFieldBlock("Display", fullscreenCheck));
+
+		msaaOption = CreateGraphicsOptionButton();
+		msaaOption.AddItem("Disabled", 0);
+		msaaOption.AddItem("2× MSAA", 1);
+		msaaOption.AddItem("4× MSAA", 2);
+		msaaOption.AddItem("8× MSAA", 3);
+		msaaOption.ItemSelected += OnMsaaItemSelected;
+		formLayout.AddChild(CreateFieldBlock("3D MSAA (geometry edges)", msaaOption));
+
+		screenSpaceAaOption = CreateGraphicsOptionButton();
+		screenSpaceAaOption.AddItem("None", 0);
+		screenSpaceAaOption.AddItem("FXAA", 1);
+		screenSpaceAaOption.AddItem("SMAA 1×", 2);
+		screenSpaceAaOption.ItemSelected += OnScreenSpaceAaItemSelected;
+		formLayout.AddChild(CreateFieldBlock("Screen-space antialiasing", screenSpaceAaOption));
+
+		taaCheck = new CheckButton
+		{
+			Text = "Temporal AA (TAA) — Forward+; can blur or ghost slightly"
+		};
+		taaCheck.Toggled += OnTaaToggled;
+		formLayout.AddChild(CreateFieldBlock("Temporal AA", taaCheck));
+
+		voxelLinearTexturesCheck = new CheckButton
+		{
+			Text = "Smooth block textures (linear + anisotropic filtering)"
+		};
+		voxelLinearTexturesCheck.Toggled += OnVoxelLinearTexturesToggled;
+		formLayout.AddChild(CreateFieldBlock("Block textures", voxelLinearTexturesCheck));
 
 		HBoxContainer actions = new();
 		actions.AddThemeConstantOverride("separation", 12);
@@ -552,10 +622,10 @@ public partial class MainMenu : Control
 			rowPanel.SizeFlagsHorizontal = SizeFlags.ExpandFill;
 			rowPanel.AddThemeStyleboxOverride("panel", CreatePanelStyle(
 				isLatest
-					? new Color(0.13f, 0.18f, 0.14f, 0.96f)
+					? new Color(0.12f, 0.16f, 0.21f, 0.96f)
 					: new Color(0.12f, 0.14f, 0.18f, 0.92f),
 				isLatest
-					? new Color(0.58f, 0.78f, 0.46f, 0.42f)
+					? new Color(0.42f, 0.56f, 0.68f, 0.45f)
 					: new Color(0.30f, 0.38f, 0.46f, 0.25f),
 				16,
 				1));
@@ -596,12 +666,12 @@ public partial class MainMenu : Control
 					CustomMinimumSize = new Vector2(72f, 28f)
 				};
 				latestLabel.AddThemeFontSizeOverride("font_size", 12);
-				latestLabel.AddThemeColorOverride("font_color", new Color(0.17f, 0.24f, 0.12f, 1f));
+				latestLabel.AddThemeColorOverride("font_color", new Color(0.88f, 0.93f, 0.98f, 1f));
 
 				PanelContainer badge = new();
 				badge.AddThemeStyleboxOverride("panel", CreatePanelStyle(
-					new Color(0.72f, 0.89f, 0.56f, 0.95f),
-					new Color(0.90f, 0.98f, 0.82f, 0.0f),
+					new Color(0.28f, 0.40f, 0.54f, 0.95f),
+					new Color(0.50f, 0.65f, 0.82f, 0.35f),
 					12,
 					0));
 				badge.AddChild(latestLabel);
@@ -709,6 +779,153 @@ public partial class MainMenu : Control
 		{
 			subtitleLabel.Text = "Adjust the game options here.";
 		}
+
+		RefreshSettingsUiFromStore();
+	}
+
+	private void RefreshSettingsUiFromStore()
+	{
+		syncingSettingsUi = true;
+		try
+		{
+			if (mouseSensitivitySlider != null)
+			{
+				mouseSensitivitySlider.Value = GameUserSettings.MouseSensitivity;
+			}
+
+			if (masterVolumeSlider != null)
+			{
+				masterVolumeSlider.Value = GameUserSettings.MasterVolumeLinear;
+			}
+
+			if (fullscreenCheck != null)
+			{
+				fullscreenCheck.ButtonPressed = GameUserSettings.Fullscreen;
+			}
+
+			if (msaaOption != null)
+			{
+				msaaOption.Selected = GameUserSettings.GraphicsMsaa3D;
+			}
+
+			if (screenSpaceAaOption != null)
+			{
+				screenSpaceAaOption.Selected = GameUserSettings.GraphicsScreenSpaceAa;
+			}
+
+			if (taaCheck != null)
+			{
+				taaCheck.ButtonPressed = GameUserSettings.GraphicsUseTaa;
+			}
+
+			if (voxelLinearTexturesCheck != null)
+			{
+				voxelLinearTexturesCheck.ButtonPressed = GameUserSettings.GraphicsVoxelLinearTextures;
+			}
+		}
+		finally
+		{
+			syncingSettingsUi = false;
+		}
+
+		UpdateSettingsValueLabels();
+	}
+
+	private void UpdateSettingsValueLabels()
+	{
+		if (mouseSensitivityValueLabel != null && mouseSensitivitySlider != null)
+		{
+			mouseSensitivityValueLabel.Text = $"{mouseSensitivitySlider.Value:0.00}";
+		}
+
+		if (masterVolumeValueLabel != null && masterVolumeSlider != null)
+		{
+			masterVolumeValueLabel.Text = $"{Mathf.RoundToInt((float)masterVolumeSlider.Value * 100f)}%";
+		}
+	}
+
+	private void OnMouseSensitivitySliderChanged(double value)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.MouseSensitivity = (float)value;
+		UpdateSettingsValueLabels();
+		GameUserSettings.Save();
+	}
+
+	private void OnMasterVolumeSliderChanged(double value)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.MasterVolumeLinear = (float)value;
+		UpdateSettingsValueLabels();
+		GameUserSettings.ApplyAudio();
+		GameUserSettings.Save();
+	}
+
+	private void OnFullscreenToggled(bool pressed)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.Fullscreen = pressed;
+		GameUserSettings.ApplyWindowMode();
+		GameUserSettings.Save();
+	}
+
+	private void OnMsaaItemSelected(long index)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.GraphicsMsaa3D = (int)index;
+		GameUserSettings.ApplyGraphics();
+		GameUserSettings.Save();
+	}
+
+	private void OnScreenSpaceAaItemSelected(long index)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.GraphicsScreenSpaceAa = (int)index;
+		GameUserSettings.ApplyGraphics();
+		GameUserSettings.Save();
+	}
+
+	private void OnTaaToggled(bool pressed)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.GraphicsUseTaa = pressed;
+		GameUserSettings.ApplyGraphics();
+		GameUserSettings.Save();
+	}
+
+	private void OnVoxelLinearTexturesToggled(bool pressed)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.GraphicsVoxelLinearTextures = pressed;
+		GameUserSettings.Save();
 	}
 
 	private void ShowCreateWorldScreen()
@@ -876,6 +1093,13 @@ public partial class MainMenu : Control
 		};
 	}
 
+	private static OptionButton CreateGraphicsOptionButton() =>
+		new()
+		{
+			SizeFlagsHorizontal = SizeFlags.ExpandFill,
+			CustomMinimumSize = new Vector2(160f, 0f)
+		};
+
 	private static VBoxContainer CreateFieldBlock(string labelText, Control control)
 	{
 		VBoxContainer field = new();
@@ -911,21 +1135,21 @@ public partial class MainMenu : Control
 	private static void StylePrimaryButton(Button button)
 	{
 		button.AddThemeStyleboxOverride("normal", CreatePanelStyle(
-			new Color(0.44f, 0.64f, 0.38f, 0.95f),
-			new Color(0.62f, 0.82f, 0.53f, 0.55f),
+			new Color(0.30f, 0.46f, 0.62f, 0.96f),
+			new Color(0.48f, 0.62f, 0.78f, 0.55f),
 			14,
 			1));
 		button.AddThemeStyleboxOverride("hover", CreatePanelStyle(
-			new Color(0.49f, 0.70f, 0.42f, 0.98f),
-			new Color(0.70f, 0.88f, 0.60f, 0.65f),
+			new Color(0.36f, 0.52f, 0.70f, 0.98f),
+			new Color(0.56f, 0.70f, 0.86f, 0.62f),
 			14,
 			1));
 		button.AddThemeStyleboxOverride("pressed", CreatePanelStyle(
-			new Color(0.36f, 0.54f, 0.31f, 1f),
-			new Color(0.70f, 0.88f, 0.60f, 0.45f),
+			new Color(0.22f, 0.36f, 0.50f, 1f),
+			new Color(0.44f, 0.58f, 0.74f, 0.45f),
 			14,
 			1));
-		button.AddThemeColorOverride("font_color", new Color(0.05f, 0.09f, 0.04f, 1f));
+		button.AddThemeColorOverride("font_color", new Color(0.96f, 0.97f, 0.99f, 1f));
 	}
 
 	private static void StyleSecondaryButton(Button button)

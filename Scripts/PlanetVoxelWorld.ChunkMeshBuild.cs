@@ -27,7 +27,6 @@ public partial class PlanetVoxelWorld
 		List<Vector2> uvs = [];
 		List<Color> colors = [];
 		List<int> indices = [];
-		List<Vector3> collisionFaces = [];
 		List<RaycastTriangleInfo> raycastTriangles = [];
 		Dictionary<long, int> localHeightCache = [];
 		FastNoiseLite localNoise = CreateLocalNoise(config);
@@ -44,7 +43,7 @@ public partial class PlanetVoxelWorld
 						continue;
 					}
 
-					AddVisibleFacesForCellSnapshot(cell, request, localHeightCache, localNoise, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
+					AddVisibleFacesForCellSnapshot(cell, request, localHeightCache, localNoise, vertices, normals, uvs, colors, indices, raycastTriangles);
 				}
 			}
 		}
@@ -57,7 +56,6 @@ public partial class PlanetVoxelWorld
 			uvs.ToArray(),
 			colors.ToArray(),
 			indices.ToArray(),
-			collisionFaces.ToArray(),
 			raycastTriangles.ToArray());
 	}
 
@@ -71,19 +69,18 @@ public partial class PlanetVoxelWorld
 		List<Vector2> uvs,
 		List<Color> colors,
 		List<int> indices,
-		List<Vector3> collisionFaces,
 		List<RaycastTriangleInfo> raycastTriangles)
 	{
 		Vector3[] corners = GetCellCornersStatic(cell, request.Snapshot.Config);
 		Rect2 atlasRect = GetAtlasRectStatic(GetBlockTypeSnapshot(cell, request.Snapshot, localHeightCache, noiseSource), request.AtlasRects);
 		Color vertexColor = request.Snapshot.Config.UseDebugColors ? GetDebugColor(cell) : Colors.White;
 
-		AddFaceIfVisibleSnapshot(cell, CellFace.Outward, [corners[4], corners[5], corners[6], corners[7]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
-		AddFaceIfVisibleSnapshot(cell, CellFace.Inward, [corners[0], corners[3], corners[2], corners[1]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
-		AddFaceIfVisibleSnapshot(cell, CellFace.PositiveU, [corners[1], corners[2], corners[6], corners[5]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
-		AddFaceIfVisibleSnapshot(cell, CellFace.NegativeU, [corners[0], corners[4], corners[7], corners[3]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
-		AddFaceIfVisibleSnapshot(cell, CellFace.PositiveV, [corners[3], corners[7], corners[6], corners[2]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
-		AddFaceIfVisibleSnapshot(cell, CellFace.NegativeV, [corners[0], corners[1], corners[5], corners[4]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, collisionFaces, raycastTriangles);
+		AddFaceIfVisibleSnapshot(cell, CellFace.Outward, [corners[4], corners[5], corners[6], corners[7]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, raycastTriangles);
+		AddFaceIfVisibleSnapshot(cell, CellFace.Inward, [corners[0], corners[3], corners[2], corners[1]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, raycastTriangles);
+		AddFaceIfVisibleSnapshot(cell, CellFace.PositiveU, [corners[1], corners[2], corners[6], corners[5]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, raycastTriangles);
+		AddFaceIfVisibleSnapshot(cell, CellFace.NegativeU, [corners[0], corners[4], corners[7], corners[3]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, raycastTriangles);
+		AddFaceIfVisibleSnapshot(cell, CellFace.PositiveV, [corners[3], corners[7], corners[6], corners[2]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, raycastTriangles);
+		AddFaceIfVisibleSnapshot(cell, CellFace.NegativeV, [corners[0], corners[1], corners[5], corners[4]], atlasRect, vertexColor, request, localHeightCache, noiseSource, vertices, normals, uvs, colors, indices, raycastTriangles);
 	}
 
 	private static void AddFaceIfVisibleSnapshot(
@@ -100,7 +97,6 @@ public partial class PlanetVoxelWorld
 		List<Vector2> uvs,
 		List<Color> colors,
 		List<int> indices,
-		List<Vector3> collisionFaces,
 		List<RaycastTriangleInfo> raycastTriangles)
 	{
 		if (request.Snapshot.Config.CullFacesAgainstNeighborBlocks &&
@@ -123,7 +119,6 @@ public partial class PlanetVoxelWorld
 			uvs,
 			colors,
 			indices,
-			collisionFaces,
 			raycastTriangles);
 	}
 
@@ -140,7 +135,6 @@ public partial class PlanetVoxelWorld
 		List<Vector2> uvs,
 		List<Color> colors,
 		List<int> indices,
-		List<Vector3> collisionFaces,
 		List<RaycastTriangleInfo> raycastTriangles)
 	{
 		int start = vertices.Count;
@@ -177,19 +171,13 @@ public partial class PlanetVoxelWorld
 		indices.Add(start + 3);
 		indices.Add(start + 2);
 
-		if (collisionFaces == null || raycastTriangles == null)
+		if (raycastTriangles == null)
 		{
 			return;
 		}
 
-		collisionFaces.Add(a);
-		collisionFaces.Add(b);
-		collisionFaces.Add(c);
+		// Match mesh triangle order: (a,c,b) then (a,d,c)
 		raycastTriangles.Add(hitInfo);
-
-		collisionFaces.Add(a);
-		collisionFaces.Add(c);
-		collisionFaces.Add(d);
 		raycastTriangles.Add(hitInfo);
 	}
 }

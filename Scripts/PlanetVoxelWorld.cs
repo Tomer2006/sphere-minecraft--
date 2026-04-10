@@ -21,6 +21,8 @@ public partial class PlanetVoxelWorld : Node3D
 	private readonly object worldDataLock = new();
 
 	private Node3D? chunkRoot;
+	private OccluderInstance3D? planetOcclusionInstance;
+	private SphereOccluder3D? planetOcclusionSphere;
 	private PlanetPlayer? trackedPlayer;
 	private FastNoiseLite? noise;
 	private StandardMaterial3D? planetMaterial;
@@ -47,9 +49,21 @@ public partial class PlanetVoxelWorld : Node3D
 
 	[ExportGroup("Chunk Streaming")]
 	[Export(PropertyHint.Range, "8,64,1")] public int ChunkSizeInCells { get; set; } = 24;
-	[Export] public bool AlwaysLoadWholePlanet { get; set; }
+	/// <summary>
+	/// Surface (face U/V) streaming: BFS steps across adjacent chunk footprints on the cube, including
+	/// face edges. Paired with <see cref="ActiveRenderRadiusChunkLoadRadius"/> to define the active
+	/// <see cref="ChunkKey"/> set.
+	/// </summary>
 	[Export(PropertyHint.Range, "1,32,1")]
-	public int ActiveRenderChunkRadius { get; set; } = 6;
+	public int ActiveRenderChunkLoadRadius { get; set; } = 5;
+
+	/// <summary>
+	/// Radial streaming: chunk layers above and below the player's radius chunk (along
+	/// <see cref="PlanetCellId.Radius"/>), combined with the surface radius to form cubic chunks only.
+	/// </summary>
+	[Export(PropertyHint.Range, "1,64,1")]
+	public int ActiveRenderRadiusChunkLoadRadius { get; set; } = 4;
+
 	[Export(PropertyHint.Range, "2,64,1")] public int SurfaceShellDepthInBlocks { get; set; } = 12;
 	[Export(PropertyHint.Range, "1,12,1")] public int ExtraOutwardBlocks { get; set; } = 2;
 	[ExportGroup("Rendering")]
@@ -70,6 +84,14 @@ public partial class PlanetVoxelWorld : Node3D
 	public int InitialChunkLoadCompletedCount => Mathf.Max(0, initialLoadTargetChunkCount - pendingInitialLoadChunks.Count);
 
 	public int InitialChunkLoadTotalCount => initialLoadTargetChunkCount;
+
+	/// <summary>Diagnostics for debug HUD (F3).</summary>
+	public int DebugLoadedChunkCount => chunks.Count;
+
+	public int DebugActiveRenderChunkCount => activeRenderChunks.Count;
+	public int DebugQueuedChunkBuildCount => queuedChunkBuilds.Count;
+	public int DebugFaceResolutionCells => faceResolution;
+	public int DebugStreamingRadiusChunk => lastStreamingPlayerRadiusChunk;
 
 	public override void _Ready()
 	{
@@ -336,7 +358,29 @@ public partial class PlanetVoxelWorld : Node3D
 			$"Rebuilding planet. FaceResolution={faceResolution}, ChunkSize={ChunkSizeInCells}, SurfaceShellDepth={SurfaceShellDepthInBlocks}, ExtraOutwardBlocks={ExtraOutwardBlocks}");
 		ResetInitialChunkLoadState();
 		ClearAllChunks();
-		UpdateStreaming(force: true, buildImmediately: !AlwaysLoadWholePlanet);
+		EnsurePlanetOcclusionOccluder();
+		// Always queue chunk builds after a rebuild. Using buildImmediately here forced every active
+		// chunk through BuildChunkImmediate in one frame, which caused severe hitches on large worlds.
+		UpdateStreaming(force: true, buildImmediately: false);
+	}
+
+	/// <summary>
+	/// Godot occlusion culling tests occludee AABBs against occluder geometry from the active camera.
+	/// Procedural chunks are not baked into an occluder mesh, so we provide a coarse sphere matching the
+	/// nominal terrain shell to help cull geometry on the far side of the planet.
+	/// </summary>
+	private void EnsurePlanetOcclusionOccluder()
+	{
+		planetOcclusionInstance ??= new OccluderInstance3D { Name = "PlanetOcclusionSphere" };
+		if (planetOcclusionInstance.GetParent() == null)
+		{
+			AddChild(planetOcclusionInstance);
+		}
+
+		planetOcclusionSphere ??= new SphereOccluder3D();
+		planetOcclusionSphere.Radius = ApproximateSurfaceRadius;
+		planetOcclusionInstance.Occluder = planetOcclusionSphere;
+		planetOcclusionInstance.Transform = Transform3D.Identity;
 	}
 
 	private void EnsureRuntimeNodes()
@@ -380,7 +424,7 @@ public partial class PlanetVoxelWorld : Node3D
 			CullMode = BaseMaterial3D.CullModeEnum.Disabled,
 			Roughness = 1f,
 			Metallic = 0f,
-			TextureFilter = BaseMaterial3D.TextureFilterEnum.NearestWithMipmaps
+			TextureFilter = GameUserSettings.GetPlanetBlockTextureFilter()
 		};
 	}
 }

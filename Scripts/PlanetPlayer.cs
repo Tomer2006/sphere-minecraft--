@@ -266,6 +266,33 @@ public partial class PlanetPlayer : CharacterBody3D
 
 	public bool IsInventoryOpen => inventoryOpen;
 
+	/// <summary>Append player / camera lines for the F3 technical HUD.</summary>
+	public void AppendTechnicalDebugHud(StringBuilder b, PlanetVoxelWorld? planet)
+	{
+		Vector3 pos = GlobalPosition;
+		b.AppendLine($"XYZ: {pos.X:F2} / {pos.Y:F2} / {pos.Z:F2}");
+		Vector3 vel = Velocity;
+		b.AppendLine($"Speed: {vel.Length():F2}  Vel: {vel.X:F2}, {vel.Y:F2}, {vel.Z:F2}");
+		if (playerCamera != null)
+		{
+			Vector3 facing = -playerCamera.GlobalTransform.Basis.Z.Normalized();
+			b.AppendLine($"Facing: {facing.X:F3} {facing.Y:F3} {facing.Z:F3}");
+		}
+
+		b.AppendLine($"Pitch: {pitch:F1} deg");
+		b.AppendLine($"Grounded: {IsOnFloor()}  Fly: {flyMode}  NoClip: {noClipMode}");
+		if (planet != null)
+		{
+			float dist = (pos - planet.PlanetCenter).Length();
+			int chunkSize = Mathf.Max(8, planet.ChunkSizeInCells);
+			int radiusBlk = dist > 0.0001f
+				? Mathf.FloorToInt(dist / Mathf.Max(0.0001f, planet.BlockSize))
+				: 0;
+			b.AppendLine(
+				$"Dist core: {dist:F2}  Surf~: {planet.ApproximateSurfaceRadius:F2}  R-block: {radiusBlk} (~chunk {radiusBlk / chunkSize})");
+		}
+	}
+
 	public void PlaceOnPlanetSurfaceTop()
 	{
 		world ??= ResolveWorld();

@@ -6,8 +6,6 @@ namespace SphereMinecraft;
 public partial class PlanetVoxelWorld
 {
 	private readonly record struct ChunkKey(int Face, int RadiusChunk, int UChunk, int VChunk);
-	private readonly record struct ChunkColumnKey(int Face, int UChunk, int VChunk);
-	private readonly record struct ChunkColumnSearchState(ChunkColumnKey Key, int Distance);
 	private readonly record struct WrappedColumn(int Face, int U, int V);
 	private readonly record struct ChunkAnchor(int Face, int U, int V);
 	private readonly record struct RaycastTriangleInfo(PlanetCellId Cell, CellFace Face);
@@ -44,12 +42,11 @@ public partial class PlanetVoxelWorld
 		Vector2[] Uvs,
 		Color[] Colors,
 		int[] Indices,
-		Vector3[] CollisionFaces,
 		RaycastTriangleInfo[] RaycastTriangles)
 	{
 		public static ChunkBuildResult Empty(ChunkKey key, int revision)
 		{
-			return new ChunkBuildResult(key, revision, [], [], [], [], [], [], []);
+			return new ChunkBuildResult(key, revision, [], [], [], [], [], []);
 		}
 	}
 

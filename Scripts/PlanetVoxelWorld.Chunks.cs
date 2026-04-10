@@ -9,9 +9,9 @@ namespace SphereMinecraft;
 
 public partial class PlanetVoxelWorld
 {
-	private const int MaxCompletedBuildsPerFrame = 16;
-	private const int MaxQueuedChunkDispatchesPerFrame = 120;
-	private const int MaxConcurrentChunkBuilds = 64;
+	private const int MaxCompletedBuildsPerFrame = 12;
+	private const int MaxQueuedChunkDispatchesPerFrame = 48;
+	private const int MaxConcurrentChunkBuilds = 32;
 
 	private void InvalidateChunksAround(PlanetCellId editedCell)
 	{
@@ -30,7 +30,7 @@ public partial class PlanetVoxelWorld
 
 		foreach (ChunkKey key in targets)
 		{
-			if (AlwaysLoadWholePlanet || activeRenderChunks.Contains(key))
+			if (activeRenderChunks.Contains(key))
 			{
 				BuildChunkImmediate(key, snapshot);
 			}
@@ -169,17 +169,34 @@ public partial class PlanetVoxelWorld
 
 	private void ApplyCompletedBuilds()
 	{
-		int processed = 0;
-		while (processed < MaxCompletedBuildsPerFrame && completedBuilds.TryDequeue(out ChunkBuildResult result))
+		List<ChunkBuildResult> batch = [];
+		while (completedBuilds.TryDequeue(out ChunkBuildResult result))
 		{
-			processed++;
-			ApplyChunkBuildResult(result);
+			batch.Add(result);
 		}
 
-		if (processed > 0)
+		if (batch.Count == 0)
+		{
+			return;
+		}
+
+		batch.Sort((a, b) => CompareChunkBuildPriority(a.Key, b.Key));
+
+		int toApply = Math.Min(MaxCompletedBuildsPerFrame, batch.Count);
+		for (int i = 0; i < toApply; i++)
+		{
+			ApplyChunkBuildResult(batch[i]);
+		}
+
+		for (int i = toApply; i < batch.Count; i++)
+		{
+			completedBuilds.Enqueue(batch[i]);
+		}
+
+		if (toApply > 0)
 		{
 			RuntimeLog.Info(RuntimeLogChannel.Chunk,
-				$"Applied {processed} completed chunk build(s) this frame. RemainingQueued={completedBuilds.Count}");
+				$"Applied {toApply} completed chunk build(s) this frame (near-player first). RemainingQueued={completedBuilds.Count}");
 		}
 	}
 
@@ -272,17 +289,125 @@ public partial class PlanetVoxelWorld
 		mesh.SurfaceSetMaterial(0, planetMaterial);
 		chunk.MeshInstance.Mesh = mesh;
 
-		chunk.RaycastTriangles.AddRange(result.RaycastTriangles);
-		chunk.CollisionShape.Shape = new ConcavePolygonShape3D
+		Vector3[] collisionPacked = PackCollisionTriangleVerticesFromIndexedMesh(result.Vertices, result.Indices);
+		int triCountFromIndices = result.Indices.Length / 3;
+		if (result.RaycastTriangles.Length != triCountFromIndices)
 		{
-			BackfaceCollision = true,
-			Data = result.CollisionFaces
-		};
+			RuntimeLog.Warning(RuntimeLogChannel.Chunk,
+				$"Chunk {FormatChunkKey(result.Key)}: raycast tri count {result.RaycastTriangles.Length} != mesh tri count {triCountFromIndices}; collision disabled for this chunk.");
+			chunk.CollisionShape.Shape = null;
+		}
+		else if (TryBuildConcaveCollisionShape(
+			         collisionPacked,
+			         result.RaycastTriangles,
+			         out ConcavePolygonShape3D? concaveShape,
+			         out RaycastTriangleInfo[] filteredRaycast))
+		{
+			chunk.RaycastTriangles.AddRange(filteredRaycast);
+			chunk.CollisionShape.Shape = concaveShape;
+		}
+		else
+		{
+			chunk.CollisionShape.Shape = null;
+			if (collisionPacked.Length > 0)
+			{
+				RuntimeLog.Warning(RuntimeLogChannel.Chunk,
+					$"Chunk {FormatChunkKey(result.Key)}: collision skipped (degenerate / invalid tris). CollisionVertsIn={collisionPacked.Length}, RaycastIn={result.RaycastTriangles.Length}");
+			}
+		}
+
 		chunkBodiesById[chunk.CollisionBody.GetInstanceId()] = chunk;
 		MarkInitialChunkLoadComplete(result.Key);
 
 		RuntimeLog.Info(RuntimeLogChannel.Chunk,
-			$"Applied chunk build {FormatChunkKey(result.Key)}. Revision={result.Revision}, Vertices={result.Vertices.Length}, Indices={result.Indices.Length}, CollisionFaces={result.CollisionFaces.Length}, RaycastTriangles={result.RaycastTriangles.Length}, CollisionEnabled=true");
+			$"Applied chunk build {FormatChunkKey(result.Key)}. Revision={result.Revision}, Vertices={result.Vertices.Length}, Indices={result.Indices.Length}, CollisionTris={chunk.RaycastTriangles.Count}, CollisionEnabled={chunk.CollisionShape.Shape != null}");
+	}
+
+	/// <summary>
+	/// Expand indexed render mesh triangles into a flat vertex triple list for <see cref="ConcavePolygonShape3D"/>.
+	/// Built on the main thread so worker threads skip maintaining a duplicate collision buffer.
+	/// </summary>
+	private static Vector3[] PackCollisionTriangleVerticesFromIndexedMesh(Vector3[] vertices, int[] indices)
+	{
+		if (indices.Length < 3 || indices.Length % 3 != 0)
+		{
+			return [];
+		}
+
+		Vector3[] packed = new Vector3[indices.Length];
+		for (int i = 0; i < indices.Length; i++)
+		{
+			int vi = indices[i];
+			if ((uint)vi >= (uint)vertices.Length)
+			{
+				return [];
+			}
+
+			packed[i] = vertices[vi];
+		}
+
+		return packed;
+	}
+
+	/// <summary>
+	/// Jolt removes degenerate triangles when building mesh shapes; if none remain, shape creation fails.
+	/// Drop zero-area collision triangles (e.g. inward faces at radius 0) and keep raycast data aligned.
+	/// </summary>
+	private const float MinCollisionTriangleCrossLengthSq = 1e-14f;
+
+	private static bool IsFiniteCollisionVector(Vector3 v) =>
+		float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
+
+	private static bool TryBuildConcaveCollisionShape(
+		Vector3[] collisionFaces,
+		RaycastTriangleInfo[] raycastInfos,
+		out ConcavePolygonShape3D? shape,
+		out RaycastTriangleInfo[] filteredRaycast)
+	{
+		shape = null;
+		filteredRaycast = [];
+		int triCount = collisionFaces.Length / 3;
+		if (collisionFaces.Length == 0 || triCount * 3 != collisionFaces.Length || raycastInfos.Length != triCount)
+		{
+			return false;
+		}
+
+		List<Vector3> packed = new(triCount * 3);
+		List<RaycastTriangleInfo> rays = new(triCount);
+		for (int t = 0; t < triCount; t++)
+		{
+			Vector3 v0 = collisionFaces[t * 3];
+			Vector3 v1 = collisionFaces[t * 3 + 1];
+			Vector3 v2 = collisionFaces[t * 3 + 2];
+			if (!IsFiniteCollisionVector(v0) || !IsFiniteCollisionVector(v1) || !IsFiniteCollisionVector(v2))
+			{
+				continue;
+			}
+
+			float crossSq = (v1 - v0).Cross(v2 - v0).LengthSquared();
+			if (crossSq < MinCollisionTriangleCrossLengthSq)
+			{
+				continue;
+			}
+
+			packed.Add(v0);
+			packed.Add(v1);
+			packed.Add(v2);
+			rays.Add(raycastInfos[t]);
+		}
+
+		if (packed.Count < 3)
+		{
+			return false;
+		}
+
+		filteredRaycast = rays.ToArray();
+		shape = new ConcavePolygonShape3D
+		{
+			BackfaceCollision = true,
+			Data = packed.ToArray()
+		};
+		return true;
 	}
 
 	private void MarkInitialChunkLoadComplete(ChunkKey key)
