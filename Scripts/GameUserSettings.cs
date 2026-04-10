@@ -37,6 +37,9 @@ public static class GameUserSettings
 	/// <summary>When true, voxel atlas uses linear + anisotropic filtering; when false, nearest (pixel-crisp).</summary>
 	public static bool GraphicsVoxelLinearTextures { get; set; } = true;
 
+	/// <summary>When true, turns off the sun and uses flat ambient so the world looks evenly lit (no directional shading).</summary>
+	public static bool GraphicsDisableLighting { get; set; }
+
 	public static void Load()
 	{
 		ConfigFile cfg = new();
@@ -52,6 +55,7 @@ public static class GameUserSettings
 		GraphicsScreenSpaceAa = ReadInt(cfg, "graphics_screen_space_aa", GraphicsScreenSpaceAa);
 		GraphicsUseTaa = (bool)cfg.GetValue(Section, "graphics_use_taa", GraphicsUseTaa).AsBool();
 		GraphicsVoxelLinearTextures = (bool)cfg.GetValue(Section, "graphics_voxel_linear_textures", GraphicsVoxelLinearTextures).AsBool();
+		GraphicsDisableLighting = (bool)cfg.GetValue(Section, "graphics_disable_lighting", GraphicsDisableLighting).AsBool();
 
 		MouseSensitivity = Mathf.Clamp(MouseSensitivity, MinMouseSensitivity, MaxMouseSensitivity);
 		MasterVolumeLinear = Mathf.Clamp(MasterVolumeLinear, 0f, 1f);
@@ -69,6 +73,7 @@ public static class GameUserSettings
 		cfg.SetValue(Section, "graphics_screen_space_aa", GraphicsScreenSpaceAa);
 		cfg.SetValue(Section, "graphics_use_taa", GraphicsUseTaa);
 		cfg.SetValue(Section, "graphics_voxel_linear_textures", GraphicsVoxelLinearTextures);
+		cfg.SetValue(Section, "graphics_disable_lighting", GraphicsDisableLighting);
 		cfg.Save(FilePath);
 	}
 
@@ -124,6 +129,85 @@ public static class GameUserSettings
 		GraphicsVoxelLinearTextures
 			? BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic
 			: BaseMaterial3D.TextureFilterEnum.NearestWithMipmaps;
+
+	private static bool lightingDefaultsCaptured;
+	private static bool defaultSunVisible = true;
+	private static float defaultSunLightEnergy = 1f;
+	private static Environment.AmbientSource defaultAmbientSource = Environment.AmbientSource.Sky;
+	private static Color defaultAmbientColor = new(0.08f, 0.09f, 0.12f, 1f);
+	private static float defaultAmbientEnergy = 0.5f;
+	private static float defaultAmbientSkyContribution = 0.08f;
+
+	/// <summary>
+	/// Applies flat ambient / sun off when <see cref="GraphicsDisableLighting"/> is set. Looks for
+	/// <c>WorldEnvironment</c> and <c>Sun</c> under the gameplay root (e.g. main scene <c>Main</c>).
+	/// </summary>
+	public static void ApplySceneLighting()
+	{
+		if (Engine.GetMainLoop() is not SceneTree tree)
+		{
+			return;
+		}
+
+		ApplySceneLightingToRoot(tree.CurrentScene);
+	}
+
+	private static void ApplySceneLightingToRoot(Node? root)
+	{
+		if (root == null)
+		{
+			return;
+		}
+
+		WorldEnvironment? worldEnv = root.GetNodeOrNull<WorldEnvironment>("WorldEnvironment");
+		DirectionalLight3D? sun = root.GetNodeOrNull<DirectionalLight3D>("Sun");
+		Environment? env = worldEnv?.Environment;
+		if (env == null)
+		{
+			return;
+		}
+
+		if (!lightingDefaultsCaptured)
+		{
+			defaultAmbientSource = env.AmbientLightSource;
+			defaultAmbientColor = env.AmbientLightColor;
+			defaultAmbientEnergy = env.AmbientLightEnergy;
+			defaultAmbientSkyContribution = env.AmbientLightSkyContribution;
+			if (sun != null)
+			{
+				defaultSunVisible = sun.Visible;
+				defaultSunLightEnergy = sun.LightEnergy;
+			}
+
+			lightingDefaultsCaptured = true;
+		}
+
+		if (GraphicsDisableLighting)
+		{
+			if (sun != null)
+			{
+				sun.Visible = false;
+			}
+
+			env.AmbientLightSource = Environment.AmbientSource.Color;
+			env.AmbientLightColor = Colors.White;
+			env.AmbientLightEnergy = 1f;
+			env.AmbientLightSkyContribution = 0f;
+		}
+		else
+		{
+			if (sun != null)
+			{
+				sun.Visible = defaultSunVisible;
+				sun.LightEnergy = defaultSunLightEnergy;
+			}
+
+			env.AmbientLightSource = defaultAmbientSource;
+			env.AmbientLightColor = defaultAmbientColor;
+			env.AmbientLightEnergy = defaultAmbientEnergy;
+			env.AmbientLightSkyContribution = defaultAmbientSkyContribution;
+		}
+	}
 
 	public static void ApplyToPlayer(PlanetPlayer player)
 	{

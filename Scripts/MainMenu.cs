@@ -33,6 +33,7 @@ public partial class MainMenu : Control
 	private OptionButton? screenSpaceAaOption;
 	private CheckButton? taaCheck;
 	private CheckButton? voxelLinearTexturesCheck;
+	private CheckButton? disableLightingCheck;
 	private bool syncingSettingsUi;
 
 	public override void _Ready()
@@ -44,6 +45,7 @@ public partial class MainMenu : Control
 		GameUserSettings.ApplyAudio();
 		GameUserSettings.ApplyWindowMode();
 		GameUserSettings.ApplyGraphics();
+		GameUserSettings.ApplySceneLighting();
 		ResetNewWorldForm();
 		ShowIntroScreen();
 		RefreshState();
@@ -312,7 +314,7 @@ public partial class MainMenu : Control
 
 		Label settingsHint = new()
 		{
-			Text = "Changes save automatically. Mouse, volume, display, and 3D AA apply immediately. Block texture filtering applies when you load a world.",
+			Text = "Changes save automatically. Mouse, volume, display, 3D AA, and lighting apply when the main game scene is running. Block texture filtering applies when you load a world.",
 			HorizontalAlignment = HorizontalAlignment.Center,
 			AutowrapMode = TextServer.AutowrapMode.WordSmart
 		};
@@ -415,6 +417,13 @@ public partial class MainMenu : Control
 		};
 		voxelLinearTexturesCheck.Toggled += OnVoxelLinearTexturesToggled;
 		formLayout.AddChild(CreateFieldBlock("Block textures", voxelLinearTexturesCheck));
+
+		disableLightingCheck = new CheckButton
+		{
+			Text = "Disable directional lighting (flat ambient, no sun)"
+		};
+		disableLightingCheck.Toggled += OnDisableLightingToggled;
+		formLayout.AddChild(CreateFieldBlock("Lighting", disableLightingCheck));
 
 		HBoxContainer actions = new();
 		actions.AddThemeConstantOverride("separation", 12);
@@ -822,6 +831,11 @@ public partial class MainMenu : Control
 			{
 				voxelLinearTexturesCheck.ButtonPressed = GameUserSettings.GraphicsVoxelLinearTextures;
 			}
+
+			if (disableLightingCheck != null)
+			{
+				disableLightingCheck.ButtonPressed = GameUserSettings.GraphicsDisableLighting;
+			}
 		}
 		finally
 		{
@@ -925,6 +939,18 @@ public partial class MainMenu : Control
 		}
 
 		GameUserSettings.GraphicsVoxelLinearTextures = pressed;
+		GameUserSettings.Save();
+	}
+
+	private void OnDisableLightingToggled(bool pressed)
+	{
+		if (syncingSettingsUi)
+		{
+			return;
+		}
+
+		GameUserSettings.GraphicsDisableLighting = pressed;
+		GameUserSettings.ApplySceneLighting();
 		GameUserSettings.Save();
 	}
 
