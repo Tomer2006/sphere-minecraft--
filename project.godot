@@ -26,5 +26,5 @@ jolt_physics_3d/queries/enable_ray_cast_face_index=true
 
 [rendering]
 
-occlusion_culling/use_occlusion_culling=true
 rendering_device/driver.windows="d3d12"
+occlusion_culling/use_occlusion_culling=true

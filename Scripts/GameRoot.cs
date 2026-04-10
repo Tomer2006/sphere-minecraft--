@@ -49,6 +49,7 @@ public partial class GameRoot : Node3D
 		GameUserSettings.Load();
 		GameUserSettings.ApplyAudio();
 		GameUserSettings.ApplyGraphics();
+		GameUserSettings.ApplySceneLighting();
 		BuildLoadingScreen();
 		BuildPauseMenu();
 		BuildTechnicalDebugHud();
